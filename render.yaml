@@ -1,17 +1,19 @@
-# render.yaml
+disks:
+  - name: bot-data
+    mountPath: /data
+    sizeGB: 1
+
 services:
   - type: web
     name: mytelegrambot
     env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
+    plan: starter
+    buildCommand: ""
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
-        value: votre_token_bot_ici
+        value: ton_token_telegram_ici
       - key: ADMIN_ID
         value: votre_id_telegram_ici
-    disk:
-      name: data
-      mountPath: /opt/render/.render
-      sizeGB: 1
+    disks:
+      - bot-data
