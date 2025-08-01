@@ -1,4 +1,3 @@
-# bot.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,12 +11,14 @@ from telegram.ext import (
 import os
 import logging
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
 # Configuration
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-PERSIST_DIR = "/opt/render/.render"  # Chemin du disque Render
+PERSIST_DIR = "/opt/render/.render"
 PERSIST_FILE = os.path.join(PERSIST_DIR, "file_storage.json")
 
 # Initialisation du logging
@@ -62,12 +63,15 @@ def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
 # Charger l'état initial
 def load_initial_storage():
     try:
-        # Créer le dossier s'il n'existe pas
         os.makedirs(PERSIST_DIR, exist_ok=True)
         
         if os.path.exists(PERSIST_FILE):
-            with open(PERSIST_FILE, 'r') as f:
-                return json.load(f)
+            try:
+                with open(PERSIST_FILE, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Fichier JSON corrompu, réinitialisation...")
+                return {}
         return {}
     except Exception as e:
         logger.error(f"Erreur de chargement du stockage: {e}")
@@ -76,11 +80,26 @@ def load_initial_storage():
 # Sauvegarder le stockage
 def save_storage(data):
     try:
-        os.makedirs(PERSIST_DIR, exist_ok=True)
         with open(PERSIST_FILE, 'w') as f:
             json.dump(data, f)
     except Exception as e:
         logger.error(f"Erreur de sauvegarde: {e}")
+
+# Health Check Server
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+    logger.info("🩺 Serveur health check démarré sur le port 8080")
+    server.serve_forever()
 
 # Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -92,25 +111,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
+    logger.info(f"Bouton pressé: {query.data} par {query.from_user.id}")
 
-    if data == "main_menu":
+    if query.data == "main_menu":
         await show_main_menu(query)
-    elif data in MAIN_CATEGORIES:
-        await handle_main_category(query, context, data)
-    elif data in SUB_CATEGORIES:
-        await handle_subcategory(query, context, data)
-    elif data.startswith("file_"):
-        await send_file_to_user(query, context, data)
-    elif data == "upload_file":
+    elif query.data in MAIN_CATEGORIES:
+        await handle_main_category(query, context, query.data)
+    elif query.data in SUB_CATEGORIES:
+        await handle_subcategory(query, context, query.data)
+    elif query.data.startswith("file_"):
+        await send_file_to_user(query, context, query.data)
+    elif query.data == "upload_file":
         await start_file_upload(query, context)
-    elif data == "manage_files":
+    elif query.data == "manage_files":
         await show_file_management(query, context)
-    elif data.startswith("delete_"):
-        await delete_file(query, context, data)
-    elif data == "cancel_upload":
+    elif query.data.startswith("delete_"):
+        await delete_file(query, context, query.data)
+    elif query.data == "cancel_upload":
         await query.edit_message_text("❌ Upload annulé")
-    elif data == "share_location":
+    elif query.data == "share_location":
         await handle_share_location(query)
 
 async def show_main_menu(query):
@@ -121,6 +140,7 @@ async def show_main_menu(query):
 
 async def handle_main_category(query, context, category):
     context.user_data["current_category"] = category
+    logger.info(f"Catégorie sélectionnée: {category}")
     
     if category == "Géolocalisation":
         await handle_geolocation(query)
@@ -155,6 +175,7 @@ async def show_subcategories_menu(query, context, category):
 async def handle_subcategory(query, context, subcategory):
     category = context.user_data.get("current_category")
     context.user_data["current_subcategory"] = subcategory
+    logger.info(f"Sous-catégorie sélectionnée: {subcategory} dans {category}")
     
     file_storage = context.bot_data.get("file_storage", {})
     files = file_storage.get(category, {}).get(subcategory, [])
@@ -172,6 +193,10 @@ async def handle_subcategory(query, context, subcategory):
         )
         return
 
+    # Afficher les fichiers avec statistiques
+    file_count = len(files)
+    last_upload = max([f.get("uploaded_at", "") for f in files], default="")
+    
     keyboard = []
     for idx, file_info in enumerate(files):
         keyboard.append([InlineKeyboardButton(
@@ -182,7 +207,9 @@ async def handle_subcategory(query, context, subcategory):
     keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=category)])
     
     await query.edit_message_text(
-        f"📂 Fichiers disponibles dans '{subcategory}':",
+        f"📂 Fichiers disponibles dans '{subcategory}':\n"
+        f"• Total: {file_count}\n"
+        f"• Dernier ajout: {last_upload[:10] if last_upload else 'N/A'}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -205,6 +232,7 @@ async def send_file_to_user(query, context, file_data):
     file_info = files[file_idx]
     
     try:
+        logger.info(f"Envoi du fichier: {file_info['name']} à {query.message.chat_id}")
         if file_info['type'] == 'document':
             await context.bot.send_document(query.message.chat_id, file_info["file_id"], caption=f"📥 {file_info['name']}")
         elif file_info['type'] == 'photo':
@@ -218,11 +246,13 @@ async def send_file_to_user(query, context, file_data):
         else:
             await context.bot.send_document(query.message.chat_id, file_info["file_id"], caption=f"📥 {file_info['name']}")
     except Exception as e:
-        logger.error(f"Error sending file: {e}")
+        logger.error(f"Erreur d'envoi du fichier: {e}")
         await query.answer("❌ Erreur lors du téléchargement", show_alert=True)
 
 # Gestion de l'upload
 async def start_file_upload(query, context):
+    logger.info("Début du processus d'upload")
+    
     if query.from_user.id != ADMIN_ID:
         await query.answer("⛔ Action réservée à l'admin", show_alert=True)
         return
@@ -251,11 +281,20 @@ async def start_file_upload(query, context):
     return UPLOADING_FILE
 
 async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Fichier reçu pour upload")
+    
+    # Vérification de sécurité supplémentaire
+    if update.effective_user.id != ADMIN_ID:
+        logger.warning(f"Tentative d'upload non autorisée par {update.effective_user.id}")
+        await update.message.reply_text("⛔ Action réservée à l'administrateur")
+        return ConversationHandler.END
+    
     user_data = context.user_data
     category = user_data.get("upload_category")
     subcategory = user_data.get("upload_subcategory")
     
     if not category or not subcategory:
+        logger.error("Catégorie non définie pour l'upload")
         await update.message.reply_text("❌ Erreur: Catégorie non définie. Veuillez recommencer.")
         return ConversationHandler.END
     
@@ -278,7 +317,7 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file_name = file.file_name or "document"
         file_type = "document"
     elif update.message.photo:
-        file = update.message.photo[-1]  # Dernier élément = meilleure qualité
+        file = update.message.photo[-1]
         file_name = "photo.jpg"
         file_type = "photo"
     elif update.message.audio:
@@ -300,6 +339,12 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     
     if file:
+        # Vérification des doublons
+        existing_files = [f["name"] for f in file_storage[category][subcategory]]
+        if file_name in existing_files:
+            await update.message.reply_text(f"⚠️ Un fichier avec le nom '{file_name}' existe déjà")
+            return UPLOADING_FILE
+        
         file_info = {
             "file_id": file.file_id,
             "name": file_name,
@@ -312,6 +357,7 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         context.bot_data["file_storage"] = file_storage
         save_storage(file_storage)
         
+        logger.info(f"Fichier ajouté: {file_name} dans {category}/{subcategory}")
         await update.message.reply_text(
             f"✅ Fichier ajouté avec succès à:\n"
             f"Catégorie: {category}\n"
@@ -406,12 +452,23 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Configuration principale
 if __name__ == '__main__':
     # Vérification des variables d'environnement
-    if not TOKEN or not ADMIN_ID:
-        logger.error("Les variables BOT_TOKEN et ADMIN_ID doivent être définies")
+    if not TOKEN:
+        logger.error("La variable BOT_TOKEN doit être définie")
         exit(1)
+    if not ADMIN_ID:
+        logger.error("La variable ADMIN_ID doit être définie")
+        exit(1)
+    
+    logger.info(f"Token: {TOKEN[:10]}...")
+    logger.info(f"Admin ID: {ADMIN_ID}")
+    
+    # Démarrer le serveur health check dans un thread séparé
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
     
     # Charger le stockage initial
     file_storage = load_initial_storage()
+    logger.info(f"Stockage initial chargé: {len(file_storage)} catégories")
     
     # Créer l'application
     app = ApplicationBuilder().token(TOKEN).build()
@@ -443,6 +500,6 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(upload_conv_handler)
 
-    logger.info("🤖 Bot en cours d'exécution...")
+    logger.info("🤖 Démarrage du bot...")
     logger.info(f"Chemin de persistance: {PERSIST_FILE}")
     app.run_polling()
