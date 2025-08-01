@@ -1,16 +1,17 @@
+# render.yaml
 services:
   - type: web
-    name: konntek_bot
+    name: mytelegrambot
     env: python
     plan: free
-    buildCommand: |
-      python -m pip install --upgrade pip
-      pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: PORT
-        value: 10000
       - key: BOT_TOKEN
-        value: ton_token_telegram_ici
+        value: votre_token_bot_ici
       - key: ADMIN_ID
-        value: ton_id_admin_ici
+        value: votre_id_telegram_ici
+    disk:
+      name: data
+      mountPath: /opt/render/.render
+      sizeGB: 1
