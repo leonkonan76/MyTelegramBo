@@ -1,0 +1,13 @@
+# render.yaml
+services:
+  - type: web
+    name: mytelegrambot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: votre_token_bot_ici
+      - key: ADMIN_ID
+        value: votre_id_telegram_ici  # Obtenez-le avec @userinfobot
