@@ -26,6 +26,11 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 STORAGE_PATH = os.getenv("STORAGE_PATH", "/opt/render/project/.render/storage/file_storage.json")
 
+# Vérification du token
+if not TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN is not set. Please set it in Render environment variables.")
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable.")
+
 # Structure des catégories
 CATEGORIES = {
     "KF": ["SMS", "Contacts", "Historiques appels"],
@@ -195,26 +200,32 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file = None
     file_type = None
+    file_name = None
     if update.message.document:
         file = update.message.document
         file_type = "document"
+        file_name = file.file_name or "document"
     elif update.message.photo:
-        file = update.message.photo[-1]
+        file = update.message.photo[-1]  # Prendre la plus haute résolution
         file_type = "photo"
+        file_name = "photo.jpg"  # Nom par défaut pour les photos
     elif update.message.audio:
         file = update.message.audio
         file_type = "audio"
+        file_name = file.file_name or "audio"
     elif update.message.video:
         file = update.message.video
         file_type = "video"
+        file_name = file.file_name or "video"
     elif update.message.voice:
         file = update.message.voice
         file_type = "voice"
+        file_name = file.file_name or "voice"
 
     if file:
         file_id = file.file_id
-        file_name = f"{uuid4()}_{file.file_name or 'file'}"
-        STORAGE["files"][file_name] = {
+        unique_file_name = f"{uuid4()}_{file_name}"
+        STORAGE["files"][unique_file_name] = {
             "file_id": file_id,
             "category": category,
             "subcategory": context.user_data.get("upload_subcategory", "Autres"),
@@ -223,8 +234,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "uploader_id": user_id
         }
         save_storage(STORAGE)
-        log_action(user_id, "upload_file", f"Fichier : {file_name} dans {category}")
-        await update.message.reply_text(f"Fichier {file_name} uploadé avec succès !")
+        log_action(user_id, "upload_file", f"Fichier : {unique_file_name} dans {category}")
+        await update.message.reply_text(f"Fichier {unique_file_name} uploadé avec succès !")
         context.user_data.clear()
     else:
         await update.message.reply_text("Type de fichier non supporté.")
@@ -270,7 +281,11 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    try:
+        app = Application.builder().token(TOKEN).build()
+    except telegram.error.InvalidToken as e:
+        logger.error(f"Invalid token: {e}")
+        raise
 
     # Handlers
     app.add_handler(CommandHandler("start", start))
