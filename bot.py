@@ -1,4 +1,4 @@
-# bot.py (version finale corrigée)
+# bot.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -7,9 +7,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     filters,
-    ConversationHandler,
-    PersistenceInput,
-    PicklePersistence
+    ConversationHandler
 )
 import os
 import logging
@@ -19,7 +17,7 @@ from datetime import datetime
 # Configuration
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-PERSIST_FILE = "file_storage.pkl"
+PERSIST_FILE = "file_storage.json"
 
 # Initialisation du logging
 logging.basicConfig(
@@ -42,7 +40,13 @@ def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
     row = []
     
     for i, btn in enumerate(buttons):
-        row.append(InlineKeyboardButton(btn, callback_data=btn))
+        # Gérer les boutons spéciaux (texte et callback_data différents)
+        if isinstance(btn, tuple):
+            text, callback_data = btn
+            row.append(InlineKeyboardButton(text, callback_data=callback_data))
+        else:
+            row.append(InlineKeyboardButton(btn, callback_data=btn))
+        
         if (i + 1) % columns == 0:
             keyboard.append(row)
             row = []
@@ -62,6 +66,11 @@ def load_initial_storage():
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+
+# Sauvegarder le stockage
+def save_storage(file_storage):
+    with open(PERSIST_FILE, 'w') as f:
+        json.dump(file_storage, f)
 
 # Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,10 +132,10 @@ async def handle_share_location(query):
 async def show_subcategories_menu(query, context, category):
     submenu_buttons = SUB_CATEGORIES.copy()
     
-    # Ajouter bouton upload pour admin
+    # Ajouter boutons spéciaux pour admin
     if query.from_user.id == ADMIN_ID:
-        submenu_buttons.append("⬆️ Upload Fichier")
-        submenu_buttons.append("⚙️ Gérer Fichiers")
+        submenu_buttons.append(("⬆️ Upload Fichier", "upload_file"))
+        submenu_buttons.append(("⚙️ Gérer Fichiers", "manage_files"))
     
     await query.edit_message_text(
         f"📁 Catégorie : {category}\nSélectionnez une sous-catégorie :",
@@ -218,20 +227,27 @@ async def start_file_upload(query, context):
     context.user_data["upload_category"] = category
     context.user_data["upload_subcategory"] = subcategory
     
-    await query.message.reply_text(
-        f"⬆️ Envoyez le fichier à ajouter à:\n"
-        f"Catégorie: {category}\n"
-        f"Sous-catégorie: {subcategory}\n\n"
-        "Vous pouvez envoyer n'importe quel type de fichier.\n"
-        "/cancel pour annuler"
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=(
+            f"⬆️ Envoyez le fichier à ajouter à:\n"
+            f"Catégorie: {category}\n"
+            f"Sous-catégorie: {subcategory}\n\n"
+            "Vous pouvez envoyer n'importe quel type de fichier.\n"
+            "/cancel pour annuler"
+        )
     )
     
     return UPLOADING_FILE
 
 async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
-    category = user_data["upload_category"]
-    subcategory = user_data["upload_subcategory"]
+    category = user_data.get("upload_category")
+    subcategory = user_data.get("upload_subcategory")
+    
+    if not category or not subcategory:
+        await update.message.reply_text("❌ Erreur: Catégorie non définie. Veuillez recommencer.")
+        return ConversationHandler.END
     
     file_storage = context.bot_data.get("file_storage", {})
     
@@ -279,10 +295,7 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         
         file_storage[category][subcategory].append(file_info)
         context.bot_data["file_storage"] = file_storage
-        
-        # Sauvegarder dans un fichier
-        with open(PERSIST_FILE, 'w') as f:
-            json.dump(file_storage, f)
+        save_storage(file_storage)
         
         await update.message.reply_text(
             f"✅ Fichier ajouté avec succès à:\n"
@@ -354,8 +367,7 @@ async def delete_file(query, context, data):
             
             # Sauvegarder les modifications
             context.bot_data["file_storage"] = file_storage
-            with open(PERSIST_FILE, 'w') as f:
-                json.dump(file_storage, f)
+            save_storage(file_storage)
             
             await query.answer(f"🗑️ Fichier supprimé: {deleted_file['name']}", show_alert=True)
             await show_file_management(query, context)
@@ -386,7 +398,7 @@ if __name__ == '__main__':
     # Charger le stockage initial
     file_storage = load_initial_storage()
     
-    # Créer l'application sans persistance complexe
+    # Créer l'application
     app = ApplicationBuilder() \
         .token(TOKEN) \
         .build()
