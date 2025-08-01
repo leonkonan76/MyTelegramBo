@@ -1,19 +1,14 @@
-disks:
-  - name: bot-data
-    mountPath: /data
-    sizeGB: 50
-
 services:
   - type: web
-    name: mytelegrambot
+    name: konntek-bot
     env: python
-    plan: starter
-    buildCommand: ""
+    plan: free
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: BOT_TOKEN
-        value: votre_token_telegram_ici
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
       - key: ADMIN_ID
-        value: votre_id_telegram_ici
-    disks:
-      - bot-data
+        sync: false
+      - key: STORAGE_PATH
+        value: /opt/render/project/.render/file_storage.json
