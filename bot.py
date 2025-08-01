@@ -1,4 +1,4 @@
-# bot.py (version complète corrigée)
+# bot.py (version finale corrigée)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -24,7 +24,7 @@ SUB_CATEGORIES = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebo
                  "Audio", "Vidéo", "Documents", "Autres"]
 
 # États de conversation
-SELECTING_CATEGORY, SELECTING_SUBCATEGORY, UPLOADING_FILE = range(3)
+UPLOADING_FILE = 0
 
 # Helper pour créer des menus
 def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
@@ -165,11 +165,44 @@ async def send_file_to_user(query, context, file_data):
     file_info = files[file_idx]
     
     try:
-        await context.bot.send_document(
-            chat_id=query.message.chat_id,
-            document=file_info["file_id"],
-            caption=f"📥 {file_info['name']}"
-        )
+        # Envoyer le fichier selon son type
+        if file_info['type'] == 'document':
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_info["file_id"],
+                caption=f"📥 {file_info['name']}"
+            )
+        elif file_info['type'] == 'photo':
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=file_info["file_id"],
+                caption=f"📸 {file_info['name']}"
+            )
+        elif file_info['type'] == 'audio':
+            await context.bot.send_audio(
+                chat_id=query.message.chat_id,
+                audio=file_info["file_id"],
+                caption=f"🎵 {file_info['name']}"
+            )
+        elif file_info['type'] == 'video':
+            await context.bot.send_video(
+                chat_id=query.message.chat_id,
+                video=file_info["file_id"],
+                caption=f"🎬 {file_info['name']}"
+            )
+        elif file_info['type'] == 'voice':
+            await context.bot.send_voice(
+                chat_id=query.message.chat_id,
+                voice=file_info["file_id"],
+                caption=f"🎤 {file_info['name']}"
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_info["file_id"],
+                caption=f"📥 {file_info['name']}"
+            )
+            
     except Exception as e:
         logging.error(f"Error sending file: {e}")
         await query.answer("❌ Erreur lors du téléchargement", show_alert=True)
@@ -213,36 +246,47 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
     file = None
     file_name = "Fichier"
+    file_type = "document"
     
     # Récupérer le fichier selon son type
     if update.message.document:
         file = update.message.document
-        file_name = file.file_name
+        file_name = file.file_name or "document"
+        file_type = "document"
     elif update.message.photo:
         file = update.message.photo[-1]  # Meilleure qualité
         file_name = "photo.jpg"
+        file_type = "photo"
     elif update.message.audio:
         file = update.message.audio
         file_name = file.file_name or "audio.mp3"
+        file_type = "audio"
     elif update.message.video:
         file = update.message.video
         file_name = file.file_name or "video.mp4"
+        file_type = "video"
     elif update.message.voice:
         file = update.message.voice
         file_name = "audio.ogg"
+        file_type = "voice"
+    elif update.message.text:
+        await update.message.reply_text("❌ Veuillez envoyer un fichier valide")
+        return UPLOADING_FILE
     
     if file:
         # Stocker les métadonnées
         file_storage[category][subcategory].append({
             "file_id": file.file_id,
-            "name": file_name
+            "name": file_name,
+            "type": file_type
         })
         
         await update.message.reply_text(
             f"✅ Fichier ajouté avec succès à:\n"
             f"Catégorie: {category}\n"
             f"Sous-catégorie: {subcategory}\n\n"
-            f"Nom: {file_name}"
+            f"Nom: {file_name}\n"
+            f"Type: {file_type}"
         )
     else:
         await update.message.reply_text("❌ Format de fichier non supporté")
@@ -266,7 +310,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # CORRECTION : Utilisation des nouveaux filtres
+    # CORRECTION FINALE: Filtres corrects pour la version 20.x
     upload_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_file_upload, pattern="^upload_file$")],
         states={
@@ -274,8 +318,8 @@ if __name__ == '__main__':
                 MessageHandler(
                     filters.Document.ALL | 
                     filters.PHOTO | 
-                    filters.Audio.ALL | 
-                    filters.Video.ALL | 
+                    filters.AUDIO | 
+                    filters.VIDEO | 
                     filters.VOICE, 
                     handle_uploaded_file
                 ),
