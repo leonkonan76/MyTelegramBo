@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import shutil
 from uuid import uuid4
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration des variables d'environnement
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Remplacez par votre ID Telegram
-STORAGE_PATH = os.getenv("STORAGE_PATH", "file_storage.json")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+STORAGE_PATH = os.getenv("STORAGE_PATH", "/opt/render/project/.render/storage/file_storage.json")
 
 # Structure des catégories
 CATEGORIES = {
@@ -37,6 +38,17 @@ CATEGORIES = {
 
 # Initialisation du stockage
 def load_storage():
+    # Créer le répertoire parent si absent
+    parent_dir = os.path.dirname(STORAGE_PATH)
+    if not os.path.exists(parent_dir):
+        os.makedirs(parent_dir)
+        logger.info(f"Répertoire créé : {parent_dir}")
+    
+    # Vérifier si STORAGE_PATH est un répertoire
+    if os.path.isdir(STORAGE_PATH):
+        shutil.rmtree(STORAGE_PATH)
+        logger.warning(f"Répertoire {STORAGE_PATH} supprimé pour permettre la création du fichier.")
+    
     try:
         with open(STORAGE_PATH, 'r') as f:
             return json.load(f)
@@ -187,7 +199,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = update.message.document
         file_type = "document"
     elif update.message.photo:
-        file = update.message.photo[-1]  # Prendre la plus haute résolution
+        file = update.message.photo[-1]
         file_type = "photo"
     elif update.message.audio:
         file = update.message.audio
