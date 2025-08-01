@@ -1,4 +1,4 @@
-# bot.py
+# bot.py (version corrigée)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -55,14 +55,8 @@ def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
     
     return InlineKeyboardMarkup(keyboard)
 
-# Sauvegarder l'état
-def save_file_storage(context, file_storage):
-    context.bot_data["file_storage"] = file_storage
-    with open(PERSIST_FILE, 'w') as f:
-        json.dump(file_storage, f)
-
-# Charger l'état
-def load_file_storage():
+# Charger l'état initial
+def load_initial_storage():
     try:
         with open(PERSIST_FILE, 'r') as f:
             return json.load(f)
@@ -285,7 +279,6 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         
         file_storage[category][subcategory].append(file_info)
         context.bot_data["file_storage"] = file_storage
-        save_file_storage(context, file_storage)
         
         await update.message.reply_text(
             f"✅ Fichier ajouté avec succès à:\n"
@@ -350,8 +343,6 @@ async def delete_file(query, context, data):
     if category in file_storage and subcategory in file_storage[category]:
         if file_idx < len(file_storage[category][subcategory]):
             deleted_file = file_storage[category][subcategory].pop(file_idx)
-            context.bot_data["file_storage"] = file_storage
-            save_file_storage(context, file_storage)
             
             # Si plus de fichiers, supprimer la sous-catégorie
             if not file_storage[category][subcategory]:
@@ -384,7 +375,6 @@ if __name__ == '__main__':
         exit(1)
     
     # Initialiser la persistance
-    file_storage = load_file_storage()
     persistence = PicklePersistence(
         filepath=PERSIST_FILE,
         store_data=PersistenceInput(bot_data=True)
@@ -394,8 +384,9 @@ if __name__ == '__main__':
         .persistence(persistence) \
         .build()
     
-    # Stocker les données initiales
-    app.bot_data["file_storage"] = file_storage
+    # Initialiser le stockage de fichiers
+    if 'file_storage' not in app.bot_data:
+        app.bot_data['file_storage'] = load_initial_storage()
 
     # Handler de conversation pour l'upload
     upload_conv_handler = ConversationHandler(
