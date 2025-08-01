@@ -1,483 +1,454 @@
 import os
 import json
 import logging
-import shutil
-import asyncio
-import tempfile
-from uuid import uuid4
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    filters,
     ContextTypes,
+    ConversationHandler,
+    filters,
 )
 
-# Configuration du logging
+# Configuration de la journalisation
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# Configuration des variables d'environnement
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-STORAGE_PATH = os.getenv("STORAGE_PATH", "/opt/render/project/.render/storage/file_storage.json")
+# Chemins et constantes
+STORAGE_PATH = "/opt/render/project/.render/storage/file_storage.json"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "465520526"))  # ID de l'admin (à configurer via Render)
+CATEGORY_STATE, SUBCATEGORY_STATE, FILE_STATE = range(3)
 
-# Vérification du token
-if not TOKEN:
-    logger.error("TELEGRAM_BOT_TOKEN is not set. Please set it in Render environment variables.")
-    raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable.")
-
-# Structure des catégories
+# Catégories et sous-catégories
 MAIN_CATEGORIES = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
-SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
-CATEGORIES = {cat: SUB_CATEGORIES for cat in MAIN_CATEGORIES}
+SUB_CATEGORIES = [
+    "SMS",
+    "Contacts",
+    "Historiques appels",
+    "iMessenger",
+    "Facebook Messenger",
+    "Audio",
+    "Vidéo",
+    "Documents",
+    "Autres",
+]
 
-# Initialisation du stockage avec verrou asynchrone
-STORAGE_LOCK = asyncio.Lock()
-STORAGE = None
-
-def load_storage():
-    logger.debug("Chargement du stockage")
-    parent_dir = os.path.dirname(STORAGE_PATH)
-    if not os.path.exists(parent_dir):
-        os.makedirs(parent_dir)
-        logger.info(f"Répertoire créé : {parent_dir}")
-    
-    if os.path.isdir(STORAGE_PATH):
-        shutil.rmtree(STORAGE_PATH)
-        logger.warning(f"Répertoire {STORAGE_PATH} supprimé pour permettre la création du fichier.")
-    
+# Charger les données de stockage
+def load_storage(file_path):
     try:
-        with open(STORAGE_PATH, 'r') as f:
-            data = json.load(f)
-            logger.debug(f"Storage chargé : {data}")
-            return data
-    except FileNotFoundError:
-        logger.info(f"Fichier {STORAGE_PATH} non trouvé, création d'un nouveau stockage.")
-        return {"files": {}, "logs": []}
-    except json.JSONDecodeError as e:
-        logger.error(f"Erreur de format JSON dans {STORAGE_PATH} : {e}")
-        return {"files": {}, "logs": []}
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        # Initialiser une structure vide avec toutes les catégories et sous-catégories
+        storage = {'files': {}, 'logs': []}
+        for category in MAIN_CATEGORIES:
+            storage['files'][category] = {subcat: [] for subcat in SUB_CATEGORIES}
+        return storage
     except Exception as e:
-        logger.error(f"Erreur lors du chargement du stockage : {e}", exc_info=True)
-        return {"files": {}, "logs": []}
+        logger.error(f"Erreur lors du chargement du stockage : {e}")
+        return {'files': {cat: {subcat: [] for subcat in SUB_CATEGORIES} for cat in MAIN_CATEGORIES}, 'logs': []}
 
-async def save_storage(data):
-    async with STORAGE_LOCK:
-        logger.debug("Début de save_storage")
-        try:
-            # Vérifier que les données sont sérialisables
-            logger.debug("Test de sérialisation JSON")
-            json.dumps(data)
-            
-            # Écrire dans un fichier temporaire
-            logger.debug("Écriture dans un fichier temporaire")
-            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, dir=os.path.dirname(STORAGE_PATH))
-            try:
-                json.dump(data, temp_file, indent=4)
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-                temp_file.close()
-                logger.debug(f"Fichier temporaire écrit : {temp_file.name}")
-                
-                # Remplacer le fichier original
-                logger.debug(f"Remplacement de {STORAGE_PATH} par {temp_file.name}")
-                shutil.move(temp_file.name, STORAGE_PATH)
-                logger.debug(f"Storage sauvegardé avec succès à {STORAGE_PATH}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'écriture du fichier temporaire : {e}", exc_info=True)
-                try:
-                    os.unlink(temp_file.name)
-                except:
-                    pass
-                raise
-        except json.JSONDecodeError as e:
-            logger.error(f"Erreur de sérialisation JSON dans save_storage : {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Erreur dans save_storage : {e}", exc_info=True)
-
-# Vérifier les permissions du fichier de stockage
-def check_storage_permissions():
+# Sauvegarder les données de stockage
+def save_storage(file_path, data):
     try:
-        parent_dir = os.path.dirname(STORAGE_PATH)
-        if not os.access(parent_dir, os.W_OK):
-            logger.error(f"Pas de permission d'écriture pour {parent_dir}")
-        else:
-            logger.debug(f"Permissions OK pour {parent_dir}")
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)
     except Exception as e:
-        logger.error(f"Erreur lors de la vérification des permissions : {e}")
+        logger.error(f"Erreur lors de la sauvegarde du stockage : {e}")
 
-STORAGE = load_storage()
-check_storage_permissions()
+# Ajouter un journal d'action
+def log_action(storage, user_id, action, details):
+    storage['logs'].append({
+        'user_id': user_id,
+        'action': action,
+        'details': details,
+        'timestamp': datetime.utcnow().isoformat()
+    })
+    save_storage(STORAGE_PATH, storage)
 
-# Fonctions utilitaires
-async def log_action(user_id, action, details):
-    logger.debug(f"Tentative d'enregistrement de l'action {action} pour l'utilisateur {user_id}")
-    try:
-        async with STORAGE_LOCK:
-            log_entry = {
-                "timestamp": datetime.now().isoformat(),
-                "user_id": user_id,
-                "action": action,
-                "details": details
-            }
-            logger.debug(f"Log préparé : {log_entry}")
-            STORAGE["logs"].append(log_entry)
-            await save_storage(STORAGE)
-            logger.debug(f"Log enregistré : {log_entry}")
-    except Exception as e:
-        logger.error(f"Erreur dans log_action : {e}", exc_info=True)
-
+# Vérifier si l'utilisateur est admin
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-def get_main_menu():
-    try:
-        keyboard = [
-            [InlineKeyboardButton(cat, callback_data=f"cat_{cat}") for cat in MAIN_CATEGORIES]
-        ]
-        return InlineKeyboardMarkup(keyboard)
-    except Exception as e:
-        logger.error(f"Erreur dans get_main_menu : {e}", exc_info=True)
-        return InlineKeyboardMarkup([])
-
-def get_subcategory_menu(category):
-    try:
-        subcategories = CATEGORIES.get(category, SUB_CATEGORIES)
-        keyboard = [
-            [InlineKeyboardButton(subcat, callback_data=f"subcat_{category}_{subcat}") for subcat in subcategories]
-        ]
-        keyboard.append([InlineKeyboardButton("Retour", callback_data="back_main")])
-        if is_admin:  # Bouton upload pour admin
-            keyboard.insert(0, [InlineKeyboardButton("Uploader fichier", callback_data=f"upload_{category}")])
-        return InlineKeyboardMarkup(keyboard)
-    except Exception as e:
-        logger.error(f"Erreur dans get_subcategory_menu : {e}", exc_info=True)
-        return InlineKeyboardMarkup([])
-
-def get_files_menu(category, subcategory):
-    try:
-        files = [
-            f for f, data in STORAGE["files"].items()
-            if data["category"] == category and data["subcategory"] == subcategory
-        ]
-        keyboard = [
-            [InlineKeyboardButton(f"File: {f[:20]}...", callback_data=f"file_{f}")]
-            for f in files
-        ]
-        keyboard.append([InlineKeyboardButton("Retour", callback_data=f"back_{category}")])
-        if is_admin:  # Bouton suppression pour admin
-            keyboard.insert(0, [InlineKeyboardButton("Supprimer fichier", callback_data=f"delete_{category}_{subcategory}")])
-        return InlineKeyboardMarkup(keyboard)
-    except Exception as e:
-        logger.error(f"Erreur dans get_files_menu : {e}", exc_info=True)
-        return InlineKeyboardMarkup([])
-
-def get_upload_subcategory_menu(category):
-    try:
-        subcategories = CATEGORIES.get(category, SUB_CATEGORIES)
-        keyboard = [
-            [InlineKeyboardButton(subcat, callback_data=f"upload_subcat_{category}_{subcat}")]
-            for subcat in subcategories
-        ]
-        keyboard.append([InlineKeyboardButton("Retour", callback_data=f"back_{category}")])
-        return InlineKeyboardMarkup(keyboard)
-    except Exception as e:
-        logger.error(f"Erreur dans get_upload_subcategory_menu : {e}", exc_info=True)
-        return InlineKeyboardMarkup([])
-
-# Handlers
-async def debug_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.debug(f"Mise à jour reçue : {update.to_dict()}")
-
+# Commande /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.debug(f"Commande /start reçue de l'utilisateur {user_id}")
-    try:
-        # Réponse immédiate pour tester
-        await update.message.reply_text("Test : Bot démarré !")
-        logger.debug("Réponse 'Test : Bot démarré !' envoyée")
-        
-        # Enregistrer l'action
-        logger.debug("Tentative d'enregistrement de l'action /start")
-        await log_action(user_id, "start", "Commande /start exécutée")
-        logger.debug("Action /start enregistrée avec succès")
-        
-        # Créer et envoyer le menu
-        logger.debug("Création du menu principal")
-        menu = get_main_menu()
-        logger.debug(f"Menu principal créé : {menu}")
-        await update.message.reply_text(
-            "Bienvenue sur @konntek_bot ! 📁\nChoisissez une catégorie :",
-            reply_markup=menu
-        )
-        logger.debug("Menu principal envoyé")
-    except Exception as e:
-        logger.error(f"Erreur dans start : {e}", exc_info=True)
-        await update.message.reply_text("Erreur lors du démarrage. Veuillez réessayer.")
+    user = update.effective_user
+    logger.info(f"Commande /start reçue de l'utilisateur {user.id} ({user.username})")
+    
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, user.id, "start", f"Commande /start exécutée par {user.username or user.first_name}")
+    
+    # Menu principal
+    buttons = [
+        [InlineKeyboardButton("📂 Voir les fichiers", callback_data="view_files")],
+        [InlineKeyboardButton("📍 Envoyer géolocalisation", callback_data="send_location")],
+    ]
+    if is_admin(user.id):
+        buttons.append([InlineKeyboardButton("⬆️ Téléverser un fichier", callback_data="upload_file")])
+        buttons.append([InlineKeyboardButton("🗑️ Supprimer un fichier", callback_data="delete_file")])
+    
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(
+        f"Bienvenue sur @konntek_bot, {user.first_name} ! Choisissez une option :",
+        reply_markup=reply_markup
+    )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Commande /logs (réservée à l'admin)
+async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("🚫 Cette commande est réservée à l'administrateur.")
+        return
+    
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, user.id, "logs", "Consultation des journaux")
+    
+    if not storage['logs']:
+        await update.message.reply_text("Aucun journal d'activité disponible.")
+        return
+    
+    response = "📜 Journaux d'activité :\n"
+    for log in storage['logs'][-10:]:  # Limiter aux 10 derniers pour éviter un message trop long
+        response += f"[{log['timestamp']}] Utilisateur {log['user_id']}: {log['action']} - {log['details']}\n"
+    
+    await update.message.reply_text(response)
+
+# Gestion des callbacks principaux
+async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    data = query.data
+    
+    user = update.effective_user
+    storage = load_storage(STORAGE_PATH)
+    
+    if query.data == "view_files":
+        log_action(storage, user.id, "view_files", "Consultation des catégories")
+        buttons = [[InlineKeyboardButton(category, callback_data=f"cat_{category}")] for category in MAIN_CATEGORIES]
+        reply_markup = InlineKeyboardMarkup(buttons)
+        await query.message.reply_text("Choisissez une catégorie :", reply_markup=reply_markup)
+    
+    elif query.data == "send_location":
+        log_action(storage, user.id, "request_location", "Demande de géolocalisation")
+        await query.message.reply_text("Veuillez partager votre position via Telegram.")
+    
+    elif query.data == "upload_file" and is_admin(user.id):
+        log_action(storage, user.id, "upload_start", "Début du processus d'upload")
+        buttons = [[InlineKeyboardButton(category, callback_data=f"upload_cat_{category}")] for category in MAIN_CATEGORIES]
+        reply_markup = InlineKeyboardMarkup(buttons)
+        await query.message.reply_text("Choisissez une catégorie pour le fichier :", reply_markup=reply_markup)
+        return CATEGORY_STATE
+    
+    elif query.data == "delete_file" and is_admin(user.id):
+        log_action(storage, user.id, "delete_start", "Début du processus de suppression")
+        buttons = [[InlineKeyboardButton(category, callback_data=f"delete_cat_{category}")] for category in MAIN_CATEGORIES]
+        reply_markup = InlineKeyboardMarkup(buttons)
+        await query.message.reply_text("Choisissez une catégorie pour supprimer un fichier :", reply_markup=reply_markup)
 
-    try:
-        if data == "back_main":
-            await query.edit_message_text(
-                "Choisissez une catégorie :",
-                reply_markup=get_main_menu()
-            )
-            return
-
-        if data.startswith("cat_"):
-            category = data[4:]
-            await log_action(user_id, "view_category", f"Catégorie : {category}")
-            await query.edit_message_text(
-                f"Catégorie : {category}\nChoisissez une sous-catégorie :",
-                reply_markup=get_subcategory_menu(category)
-            )
-            return
-
-        if data.startswith("subcat_"):
-            _, category, subcategory = data.split("_", 2)
-            await log_action(user_id, "view_subcategory", f"Sous-catégorie : {subcategory}")
-            await query.edit_message_text(
-                f"Sous-catégorie : {subcategory}\nFichiers disponibles :",
-                reply_markup=get_files_menu(category, subcategory)
-            )
-            return
-
-        if data.startswith("back_"):
-            category = data[5:]
-            await query.edit_message_text(
-                f"Catégorie : {category}\nChoisissez une sous-catégorie :",
-                reply_markup=get_subcategory_menu(category)
-            )
-            return
-
-        if data.startswith("file_"):
-            file_id = data[5:]
-            file_data = STORAGE["files"].get(file_id)
-            if file_data:
-                await log_action(user_id, "download_file", f"Fichier : {file_id}")
-                await context.bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=file_data["file_id"],
-                    caption=f"Fichier : {file_id}"
-                )
-            return
-
-        if data.startswith("upload_"):
-            if not is_admin(user_id):
-                await query.message.reply_text("Action réservée aux administrateurs.")
-                return
-            category = data[7:]
-            context.user_data["upload_category"] = category
-            await query.edit_message_text(
-                f"Choisissez une sous-catégorie pour l'upload dans {category} :",
-                reply_markup=get_upload_subcategory_menu(category)
-            )
-            return
-
-        if data.startswith("upload_subcat_"):
-            if not is_admin(user_id):
-                await query.message.reply_text("Action réservée aux administrateurs.")
-                return
-            _, category, subcategory = data.split("_", 2)
-            context.user_data["upload_category"] = category
-            context.user_data["upload_subcategory"] = subcategory
-            await query.message.reply_text(
-                f"Envoyez le fichier à uploader dans {category} > {subcategory} (admin uniquement)."
-            )
-            return
-
-        if data.startswith("delete_"):
-            if not is_admin(user_id):
-                await query.message.reply_text("Action réservée aux administrateurs.")
-                return
-            _, category, subcategory = data.split("_", 2)
-            context.user_data["delete_mode"] = {"category": category, "subcategory": subcategory}
-            await query.message.reply_text(
-                "Envoyez le nom du fichier à supprimer (admin uniquement)."
-            )
-            return
-    except Exception as e:
-        logger.error(f"Erreur dans button_callback : {e}", exc_info=True)
-        await query.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
-
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("Action réservée aux administrateurs.")
+# Gestion des catégories (lecture)
+async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    category = query.data.replace("cat_", "")
+    if category not in MAIN_CATEGORIES:
+        await query.message.reply_text("Catégorie invalide.")
         return
+    
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, update.effective_user.id, "category_view", f"Consultation de la catégorie {category}")
+    
+    buttons = [[InlineKeyboardButton(subcat, callback_data=f"subcat_{category}_{subcat}")] for subcat in SUB_CATEGORIES]
+    reply_markup = InlineKeyboardMarkup(buttons + [[InlineKeyboardButton("⬅️ Retour", callback_data="view_files")]])
+    await query.message.reply_text(f"Sous-catégories pour {category} :", reply_markup=reply_markup)
 
-    category = context.user_data.get("upload_category")
-    subcategory = context.user_data.get("upload_subcategory")
-    if not category or not subcategory:
-        await update.message.reply_text("Veuillez sélectionner une catégorie et une sous-catégorie d'abord.")
+# Gestion des sous-catégories (lecture)
+async def subcategory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, category, subcategory = query.data.split("_", 2)
+    if category not in MAIN_CATEGORIES or subcategory not in SUB_CATEGORIES:
+        await query.message.reply_text("Sous-catégorie invalide.")
         return
+    
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, update.effective_user.id, "subcategory_view", f"Consultation de {category}/{subcategory}")
+    
+    files = storage['files'].get(category, {}).get(subcategory, [])
+    if not files:
+        await query.message.reply_text(f"Aucun fichier dans {category}/{subcategory}.",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data=f"cat_{category}")]]))
+        return
+    
+    buttons = [[InlineKeyboardButton(f"Fichier {i+1}", callback_data=f"file_{category}_{subcategory}_{file_id}")] for i, file_id in enumerate(files)]
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"cat_{category}")])
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await query.message.reply_text(f"Fichiers dans {category}/{subcategory} :", reply_markup=reply_markup)
 
+# Envoi de fichier
+async def send_file_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, category, subcategory, file_id = query.data.split("_", 3)
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, update.effective_user.id, "file_access", f"Accès au fichier {file_id} dans {category}/{subcategory}")
+    
     try:
-        file = None
-        file_type = None
-        file_name = None
-        if update.message.document:
-            file = update.message.document
-            file_type = "document"
-            file_name = file.file_name or "document"
-        elif update.message.photo:
-            file = update.message.photo[-1]
-            file_type = "photo"
-            file_name = "photo.jpg"
-        elif update.message.audio:
-            file = update.message.audio
-            file_type = "audio"
-            file_name = file.file_name or "audio"
-        elif update.message.video:
-            file = update.message.video
-            file_type = "video"
-            file_name = file.file_name or "video"
-        elif update.message.voice:
-            file = update.message.voice
-            file_type = "voice"
-            file_name = file.file_name or "voice"
-
-        if file:
-            file_id = file.file_id
-            unique_file_name = f"{uuid4()}_{file_name}"
-            STORAGE["files"][unique_file_name] = {
-                "file_id": file_id,
-                "category": category,
-                "subcategory": subcategory,
-                "type": file_type,
-                "uploaded_at": datetime.now().isoformat(),
-                "uploader_id": user_id
-            }
-            await save_storage(STORAGE)
-            await log_action(user_id, "upload_file", f"Fichier : {unique_file_name} dans {category} > {subcategory}")
-            await update.message.reply_text(f"Fichier {unique_file_name} uploadé avec succès !")
-            context.user_data.clear()
+        if file_id.endswith(".jpg") or file_id.endswith(".png"):
+            await query.message.reply_photo(file_id.split("_")[0])
+        elif file_id.endswith(".mp3") or file_id.endswith(".ogg"):
+            await query.message.reply_audio(file_id.split("_")[0])
+        elif file_id.endswith(".mp4"):
+            await query.message.reply_video(file_id.split("_")[0])
+        elif file_id.endswith(".oga"):
+            await query.message.reply_voice(file_id.split("_")[0])
         else:
-            await update.message.reply_text("Type de fichier non supporté.")
+            await query.message.reply_document(file_id.split("_")[0])
     except Exception as e:
-        logger.error(f"Erreur dans handle_file : {e}", exc_info=True)
-        await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
+        logger.error(f"Erreur lors de l'envoi du fichier {file_id} : {e}")
+        await query.message.reply_text("Erreur lors de l'envoi du fichier.")
 
-async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("Action réservée aux administrateurs.")
+# ConversationHandler pour /upload (réservé à l'admin)
+async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("🚫 Cette commande est réservée à l'administrateur.")
+        return ConversationHandler.END
+    
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, user.id, "upload_start", "Début du processus d'upload")
+    
+    buttons = [[InlineKeyboardButton(category, callback_data=f"upload_cat_{category}")] for category in MAIN_CATEGORIES]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text("Choisissez une catégorie pour le fichier :", reply_markup=reply_markup)
+    return CATEGORY_STATE
+
+async def upload_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🚫 Action réservée à l'administrateur.")
+        return ConversationHandler.END
+    
+    category = query.data.replace("upload_cat_", "")
+    if category not in MAIN_CATEGORIES:
+        await query.message.reply_text("Catégorie invalide.")
+        return ConversationHandler.END
+    
+    context.user_data['category'] = category
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, update.effective_user.id, "upload_category", f"Catégorie choisie : {category}")
+    
+    buttons = [[InlineKeyboardButton(subcat, callback_data=f"upload_subcat_{subcat}")] for subcat in SUB_CATEGORIES]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await query.message.reply_text(f"Choisissez une sous-catégorie pour {category} :", reply_markup=reply_markup)
+    return SUBCATEGORY_STATE
+
+async def upload_subcategory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🚫 Action réservée à l'administrateur.")
+        return ConversationHandler.END
+    
+    subcategory = query.data.replace("upload_subcat_", "")
+    category = context.user_data.get('category')
+    if category not in MAIN_CATEGORIES or subcategory not in SUB_CATEGORIES:
+        await query.message.reply_text("Sous-catégorie invalide.")
+        return ConversationHandler.END
+    
+    context.user_data['subcategory'] = subcategory
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, update.effective_user.id, "upload_subcategory", f"Sous-catégorie choisie : {subcategory}")
+    
+    await query.message.reply_text("Veuillez envoyer le fichier à uploader (photo, document, audio, vidéo, voix).")
+    return FILE_STATE
+
+async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("🚫 Action réservée à l'administrateur.")
+        return ConversationHandler.END
+    
+    file = (
+        update.message.document or
+        (update.message.photo[-1] if update.message.photo else None) or
+        update.message.audio or
+        update.message.video or
+        update.message.voice
+    )
+    if not file:
+        await update.message.reply_text("Aucun fichier valide reçu. Veuillez envoyer un fichier, une photo, un audio, une vidéo ou un message vocal.")
+        return FILE_STATE
+    
+    file_id = file.file_id if hasattr(file, 'file_id') else file.file_unique_id
+    file_ext = (
+        ".jpg" if update.message.photo else
+        ".mp3" if update.message.audio else
+        ".mp4" if update.message.video else
+        ".oga" if update.message.voice else
+        os.path.splitext(file.file_name)[1] if hasattr(file, 'file_name') else ".bin"
+    )
+    
+    category = context.user_data.get('category')
+    subcategory = context.user_data.get('subcategory')
+    
+    storage = load_storage(STORAGE_PATH)
+    storage['files'][category][subcategory].append(f"{file_id}_{file_ext}")
+    log_action(storage, user.id, "upload_file", f"Fichier {file_id} téléversé dans {category}/{subcategory}")
+    save_storage(STORAGE_PATH, storage)
+    
+    await update.message.reply_text(f"Fichier téléversé avec succès dans {category}/{subcategory} !")
+    return ConversationHandler.END
+
+async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, user.id, "cancel_upload", "Annulation du processus d'upload")
+    
+    await update.message.reply_text("Téléversement annulé.")
+    return ConversationHandler.END
+
+# Gestion de la suppression (réservée à l'admin)
+async def delete_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🚫 Action réservée à l'administrateur.")
         return
-
-    delete_mode = context.user_data.get("delete_mode")
-    if not delete_mode:
-        await update.message.reply_text("Veuillez sélectionner une sous-catégorie d'abord.")
+    
+    category = query.data.replace("delete_cat_", "")
+    if category not in MAIN_CATEGORIES:
+        await query.message.reply_text("Catégorie invalide.")
         return
+    
+    context.user_data['category'] = category
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, update.effective_user.id, "delete_category", f"Catégorie choisie pour suppression : {category}")
+    
+    buttons = [[InlineKeyboardButton(subcat, callback_data=f"delete_subcat_{category}_{subcat}")] for subcat in SUB_CATEGORIES]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await query.message.reply_text(f"Choisissez une sous-catégorie pour supprimer un fichier dans {category} :", reply_markup=reply_markup)
 
-    try:
-        file_name = update.message.text.strip()
-        if file_name in STORAGE["files"]:
-            file_data = STORAGE["files"][file_name]
-            if (file_data["category"] == delete_mode["category"] and
-                    file_data["subcategory"] == delete_mode["subcategory"]):
-                del STORAGE["files"][file_name]
-                await save_storage(STORAGE)
-                await log_action(user_id, "delete_file", f"Fichier : {file_name}")
-                await update.message.reply_text(f"Fichier {file_name} supprimé avec succès !")
-            else:
-                await update.message.reply_text("Fichier non trouvé dans cette catégorie.")
-        else:
-            await update.message.reply_text("Fichier non trouvé.")
-        context.user_data.clear()
-    except Exception as e:
-        logger.error(f"Erreur dans handle_delete : {e}", exc_info=True)
-        await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
+async def delete_subcategory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🚫 Action réservée à l'administrateur.")
+        return
+    
+    _, category, subcategory = query.data.split("_", 2)
+    if category not in MAIN_CATEGORIES or subcategory not in SUB_CATEGORIES:
+        await query.message.reply_text("Sous-catégorie invalide.")
+        return
+    
+    storage = load_storage(STORAGE_PATH)
+    files = storage['files'].get(category, {}).get(subcategory, [])
+    if not files:
+        await query.message.reply_text(f"Aucun fichier dans {category}/{subcategory}.",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data=f"delete_cat_{category}")]]))
+        return
+    
+    context.user_data['category'] = category
+    context.user_data['subcategory'] = subcategory
+    buttons = [[InlineKeyboardButton(f"Fichier {i+1}", callback_data=f"delete_file_{category}_{subcategory}_{file_id}")] for i, file_id in enumerate(files)]
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"delete_cat_{category}")])
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await query.message.reply_text(f"Choisissez un fichier à supprimer dans {category}/{subcategory} :", reply_markup=reply_markup)
 
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+async def delete_file_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("🚫 Action réservée à l'administrateur.")
+        return
+    
+    _, category, subcategory, file_id = query.data.split("_", 3)
+    storage = load_storage(STORAGE_PATH)
+    
+    if file_id in storage['files'][category][subcategory]:
+        storage['files'][category][subcategory].remove(file_id)
+        log_action(storage, update.effective_user.id, "delete_file", f"Fichier {file_id} supprimé de {category}/{subcategory}")
+        save_storage(STORAGE_PATH, storage)
+        await query.message.reply_text(f"Fichier supprimé de {category}/{subcategory}.",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data=f"delete_cat_{category}")]]))
+    else:
+        await query.message.reply_text("Fichier introuvable.")
+
+# Gestion de la géolocalisation
+async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     location = update.message.location
-    if location:
-        try:
-            await log_action(user_id, "share_location", f"Coordonnées : {location.latitude}, {location.longitude}")
-            await update.message.reply_text(
-                f"Position reçue !\nLatitude : {location.latitude}\nLongitude : {location.longitude}"
-            )
-        except Exception as e:
-            logger.error(f"Erreur dans handle_location : {e}", exc_info=True)
-            await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
+    if not location:
+        await update.message.reply_text("Aucune position reçue. Veuillez partager votre position via Telegram.")
+        return
+    
+    storage = load_storage(STORAGE_PATH)
+    log_action(storage, user.id, "location_shared", f"Position reçue : lat={location.latitude}, lon={location.longitude}")
+    
+    await update.message.reply_text(f"Position reçue : Latitude {location.latitude}, Longitude {location.longitude}")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Erreur globale : {context.error}", exc_info=True)
-    if update:
-        await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
-
+# Gestion principale
 async def main():
-    try:
-        # Créer une nouvelle instance de l'application
-        app = Application.builder().token(TOKEN).build()
-        logger.debug("Application Telegram initialisée")
+    # Charger le jeton d'API depuis une variable d'environnement
+    token = os.getenv("TELEGRAM_TOKEN")
+    if not token:
+        logger.error("Le jeton TELEGRAM_TOKEN n'est pas défini dans les variables d'environnement.")
+        return
 
-        # Handlers
-        app.add_handler(MessageHandler(filters.ALL, debug_update), group=1)
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(button_callback))
-        app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VIDEO | filters.VOICE, handle_file))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delete))
-        app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-        app.add_handler(CommandHandler("upload", start))  # Handler temporaire pour /upload
-        app.add_error_handler(error_handler)
+    # Initialiser l'application avec python-telegram-bot v20.8
+    application = Application.builder().token(token).build()
 
-        logger.info("Starting polling")
-        # Récupérer les dernières mises à jour pour réinitialiser l'offset
-        try:
-            await app.initialize()
-            updates = await app.bot.get_updates(timeout=10)
-            logger.debug(f"Mises à jour initiales reçues : {len(updates)}")
-            if updates:
-                last_update_id = updates[-1].update_id
-                logger.debug(f"Dernier update_id : {last_update_id}")
-                await app.bot.get_updates(offset=last_update_id + 1, timeout=10)
-            # Lancer le polling sans fermer l'event loop
-            await app.start()
-            await app.updater.start_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
-            await asyncio.Event().wait()  # Attendre indéfiniment
-        except Exception as e:
-            logger.error(f"Erreur lors de l'initialisation du polling : {e}", exc_info=True)
-            raise
-        finally:
-            try:
-                await app.updater.stop()
-                await app.stop()
-                await app.shutdown()
-                logger.debug("Application Telegram arrêtée proprement")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'arrêt de l'application : {e}", exc_info=True)
-    except Exception as e:
-        logger.error(f"Erreur dans main : {e}", exc_info=True)
-        raise
+    # Charger le stockage
+    storage = load_storage(STORAGE_PATH)
+    logger.info(f"Stockage chargé : {len(storage['logs'])} journaux, structure des fichiers initialisée")
 
-def run_bot():
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-    except Exception as e:
-        logger.error(f"Erreur dans run_bot : {e}", exc_info=True)
-    finally:
-        try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.close()
-            logger.debug("Event loop fermé proprement")
-        except Exception as e:
-            logger.error(f"Erreur lors de la fermeture de l'event loop : {e}", exc_info=True)
+    # Supprimer tout webhook existant pour utiliser le polling
+    await application.bot.delete_webhook()
+
+    # Ajouter les gestionnaires de commandes
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("logs", logs))
+    
+    # Gestionnaires de callbacks
+    application.add_handler(CallbackQueryHandler(main_callback, pattern="^(view_files|send_location|upload_file|delete_file)$"))
+    application.add_handler(CallbackQueryHandler(category_callback, pattern="^cat_"))
+    application.add_handler(CallbackQueryHandler(subcategory_callback, pattern="^subcat_"))
+    application.add_handler(CallbackQueryHandler(send_file_callback, pattern="^file_"))
+    application.add_handler(CallbackQueryHandler(delete_category_callback, pattern="^delete_cat_"))
+    application.add_handler(CallbackQueryHandler(delete_subcategory_callback, pattern="^delete_subcat_"))
+    application.add_handler(CallbackQueryHandler(delete_file_callback, pattern="^delete_file_"))
+
+    # ConversationHandler pour /upload
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("upload", upload)],
+        states={
+            CATEGORY_STATE: [CallbackQueryHandler(upload_category_callback, pattern="^upload_cat_")],
+            SUBCATEGORY_STATE: [CallbackQueryHandler(upload_subcategory_callback, pattern="^upload_subcat_")],
+            FILE_STATE: [MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VIDEO | filters.VOICE, upload_file)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_upload)],
+    )
+    application.add_handler(conv_handler)
+
+    # Gestionnaire pour la géolocalisation
+    application.add_handler(MessageHandler(filters.LOCATION, location_handler))
+
+    # Démarrer le polling
+    await application.run_polling(timeout=15)
 
 if __name__ == "__main__":
-    logger.debug("Démarrage du bot")
-    run_bot()
+    import asyncio
+    asyncio.run(main())
