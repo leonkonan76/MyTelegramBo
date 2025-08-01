@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-*.log
-.env
-file_storage.json
-file_storage.json.corrupt.*
-.DS_Store
-venv/
