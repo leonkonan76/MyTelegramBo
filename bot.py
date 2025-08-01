@@ -53,7 +53,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("📍 Merci de partager votre position :", reply_markup=keyboard)
         else:
             context.user_data["current_category"] = data
-            # Reset subcategory selection
             context.user_data.pop("current_subcategory", None)
             await query.message.reply_text(f"📂 Vous avez choisi {data}. Voici les sous-catégories disponibles :", reply_markup=get_sub_menu())
     elif data in sub_buttons:
@@ -85,25 +84,29 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_name = "unknown"
     file_type = None
 
+    # Gérer tous types de fichiers
     if update.message.document:
         file = update.message.document
         file_name = file.file_name
         file_type = "document"
-    elif update.message.audio:
-        file = update.message.audio
-        file_name = file.file_name or "audio.mp3"
-        file_type = "audio"
-    elif update.message.video:
-        file = update.message.video
-        file_name = file.file_name or "video.mp4"
-        file_type = "video"
     elif update.message.photo:
         file = update.message.photo[-1]
         file_name = f"photo_{file.file_id}.jpg"
         file_type = "photo"
-
-    if not file:
-        await update.message.reply_text("⚠️ Fichier non pris en charge.")
+    elif update.message.video:
+        file = update.message.video
+        file_name = file.file_name or f"video_{file.file_id}.mp4"
+        file_type = "video"
+    elif update.message.audio:
+        file = update.message.audio
+        file_name = file.file_name or f"audio_{file.file_id}.mp3"
+        file_type = "audio"
+    elif update.message.voice:
+        file = update.message.voice
+        file_name = f"voice_{file.file_id}.ogg"
+        file_type = "voice"
+    else:
+        await update.message.reply_text("⚠️ Type de fichier non supporté.")
         return
 
     file_id = file.file_id
@@ -113,6 +116,7 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if sub not in files_db[cat]:
         files_db[cat][sub] = []
 
+    # Eviter doublons si nécessaire, sinon juste ajouter
     files_db[cat][sub].append({"file_id": file_id, "file_name": file_name, "file_type": file_type})
     save_files()
 
@@ -152,8 +156,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(CommandHandler("listfiles", listfiles_command))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, upload_file_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.Audio.ALL | filters.Video.ALL | filters.Photo.ALL, upload_file_handler))
 
     print("✅ Bot en cours d'exécution...")
     app.run_polling()
