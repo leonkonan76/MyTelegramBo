@@ -2,8 +2,8 @@ import os
 import json
 import logging
 import shutil
-import threading
 import asyncio
+import tempfile
 from uuid import uuid4
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,45 +38,69 @@ MAIN_CATEGORIES = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisati
 SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
 CATEGORIES = {cat: SUB_CATEGORIES for cat in MAIN_CATEGORIES}
 
-# Initialisation du stockage avec verrou pour accès concurrent
-STORAGE_LOCK = threading.Lock()
+# Initialisation du stockage avec verrou asynchrone
+STORAGE_LOCK = asyncio.Lock()
 STORAGE = None
 
 def load_storage():
-    with STORAGE_LOCK:
-        parent_dir = os.path.dirname(STORAGE_PATH)
-        if not os.path.exists(parent_dir):
-            os.makedirs(parent_dir)
-            logger.info(f"Répertoire créé : {parent_dir}")
-        
-        if os.path.isdir(STORAGE_PATH):
-            shutil.rmtree(STORAGE_PATH)
-            logger.warning(f"Répertoire {STORAGE_PATH} supprimé pour permettre la création du fichier.")
-        
-        try:
-            with open(STORAGE_PATH, 'r') as f:
-                data = json.load(f)
-                logger.debug(f"Storage chargé : {data}")
-                return data
-        except FileNotFoundError:
-            logger.info(f"Fichier {STORAGE_PATH} non trouvé, création d'un nouveau stockage.")
-            return {"files": {}, "logs": []}
-        except json.JSONDecodeError as e:
-            logger.error(f"Erreur de format JSON dans {STORAGE_PATH} : {e}")
-            return {"files": {}, "logs": []}
+    logger.debug("Chargement du stockage")
+    parent_dir = os.path.dirname(STORAGE_PATH)
+    if not os.path.exists(parent_dir):
+        os.makedirs(parent_dir)
+        logger.info(f"Répertoire créé : {parent_dir}")
+    
+    if os.path.isdir(STORAGE_PATH):
+        shutil.rmtree(STORAGE_PATH)
+        logger.warning(f"Répertoire {STORAGE_PATH} supprimé pour permettre la création du fichier.")
+    
+    try:
+        with open(STORAGE_PATH, 'r') as f:
+            data = json.load(f)
+            logger.debug(f"Storage chargé : {data}")
+            return data
+    except FileNotFoundError:
+        logger.info(f"Fichier {STORAGE_PATH} non trouvé, création d'un nouveau stockage.")
+        return {"files": {}, "logs": []}
+    except json.JSONDecodeError as e:
+        logger.error(f"Erreur de format JSON dans {STORAGE_PATH} : {e}")
+        return {"files": {}, "logs": []}
+    except Exception as e:
+        logger.error(f"Erreur lors du chargement du stockage : {e}", exc_info=True)
+        return {"files": {}, "logs": []}
 
-def save_storage(data):
-    with STORAGE_LOCK:
+async def save_storage(data):
+    async with STORAGE_LOCK:
+        logger.debug("Début de save_storage")
         try:
             # Vérifier que les données sont sérialisables
-            json.dumps(data)  # Test de sérialisation
-            with open(STORAGE_PATH, 'w') as f:
-                json.dump(data, f, indent=4)
-            logger.debug(f"Storage sauvegardé : {data}")
+            logger.debug("Test de sérialisation JSON")
+            json.dumps(data)
+            
+            # Écrire dans un fichier temporaire
+            logger.debug("Écriture dans un fichier temporaire")
+            temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, dir=os.path.dirname(STORAGE_PATH))
+            try:
+                json.dump(data, temp_file, indent=4)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+                temp_file.close()
+                logger.debug(f"Fichier temporaire écrit : {temp_file.name}")
+                
+                # Remplacer le fichier original
+                logger.debug(f"Remplacement de {STORAGE_PATH} par {temp_file.name}")
+                shutil.move(temp_file.name, STORAGE_PATH)
+                logger.debug(f"Storage sauvegardé avec succès à {STORAGE_PATH}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'écriture du fichier temporaire : {e}", exc_info=True)
+                try:
+                    os.unlink(temp_file.name)
+                except:
+                    pass
+                raise
         except json.JSONDecodeError as e:
             logger.error(f"Erreur de sérialisation JSON dans save_storage : {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Erreur lors de l'écriture dans {STORAGE_PATH} : {e}", exc_info=True)
+            logger.error(f"Erreur dans save_storage : {e}", exc_info=True)
 
 # Vérifier les permissions du fichier de stockage
 def check_storage_permissions():
@@ -93,19 +117,20 @@ STORAGE = load_storage()
 check_storage_permissions()
 
 # Fonctions utilitaires
-def log_action(user_id, action, details):
+async def log_action(user_id, action, details):
+    logger.debug(f"Tentative d'enregistrement de l'action {action} pour l'utilisateur {user_id}")
     try:
-        with STORAGE_LOCK:
+        async with STORAGE_LOCK:
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
                 "user_id": user_id,
                 "action": action,
                 "details": details
             }
-            STORAGE["logs"].append(log_entry)
             logger.debug(f"Log préparé : {log_entry}")
-            save_storage(STORAGE)
-            logger.info(f"Log enregistré : {log_entry}")
+            STORAGE["logs"].append(log_entry)
+            await save_storage(STORAGE)
+            logger.debug(f"Log enregistré : {log_entry}")
     except Exception as e:
         logger.error(f"Erreur dans log_action : {e}", exc_info=True)
 
@@ -181,7 +206,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Enregistrer l'action
         logger.debug("Tentative d'enregistrement de l'action /start")
-        log_action(user_id, "start", "Commande /start exécutée")
+        await log_action(user_id, "start", "Commande /start exécutée")
         logger.debug("Action /start enregistrée avec succès")
         
         # Créer et envoyer le menu
@@ -213,7 +238,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("cat_"):
             category = data[4:]
-            log_action(user_id, "view_category", f"Catégorie : {category}")
+            await log_action(user_id, "view_category", f"Catégorie : {category}")
             await query.edit_message_text(
                 f"Catégorie : {category}\nChoisissez une sous-catégorie :",
                 reply_markup=get_subcategory_menu(category)
@@ -222,7 +247,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("subcat_"):
             _, category, subcategory = data.split("_", 2)
-            log_action(user_id, "view_subcategory", f"Sous-catégorie : {subcategory}")
+            await log_action(user_id, "view_subcategory", f"Sous-catégorie : {subcategory}")
             await query.edit_message_text(
                 f"Sous-catégorie : {subcategory}\nFichiers disponibles :",
                 reply_markup=get_files_menu(category, subcategory)
@@ -241,7 +266,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_id = data[5:]
             file_data = STORAGE["files"].get(file_id)
             if file_data:
-                log_action(user_id, "download_file", f"Fichier : {file_id}")
+                await log_action(user_id, "download_file", f"Fichier : {file_id}")
                 await context.bot.send_document(
                     chat_id=query.message.chat_id,
                     document=file_data["file_id"],
@@ -335,8 +360,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "uploaded_at": datetime.now().isoformat(),
                 "uploader_id": user_id
             }
-            save_storage(STORAGE)
-            log_action(user_id, "upload_file", f"Fichier : {unique_file_name} dans {category} > {subcategory}")
+            await save_storage(STORAGE)
+            await log_action(user_id, "upload_file", f"Fichier : {unique_file_name} dans {category} > {subcategory}")
             await update.message.reply_text(f"Fichier {unique_file_name} uploadé avec succès !")
             context.user_data.clear()
         else:
@@ -363,8 +388,8 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if (file_data["category"] == delete_mode["category"] and
                     file_data["subcategory"] == delete_mode["subcategory"]):
                 del STORAGE["files"][file_name]
-                save_storage(STORAGE)
-                log_action(user_id, "delete_file", f"Fichier : {file_name}")
+                await save_storage(STORAGE)
+                await log_action(user_id, "delete_file", f"Fichier : {file_name}")
                 await update.message.reply_text(f"Fichier {file_name} supprimé avec succès !")
             else:
                 await update.message.reply_text("Fichier non trouvé dans cette catégorie.")
@@ -380,7 +405,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     location = update.message.location
     if location:
         try:
-            log_action(user_id, "share_location", f"Coordonnées : {location.latitude}, {location.longitude}")
+            await log_action(user_id, "share_location", f"Coordonnées : {location.latitude}, {location.longitude}")
             await update.message.reply_text(
                 f"Position reçue !\nLatitude : {location.latitude}\nLongitude : {location.longitude}"
             )
