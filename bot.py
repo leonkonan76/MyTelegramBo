@@ -1,4 +1,4 @@
-# bot.py (version finale corrigée)
+# bot.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -7,24 +7,34 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     filters,
-    ConversationHandler
+    ConversationHandler,
+    PersistenceInput,
+    PicklePersistence
 )
 import os
 import logging
+import json
+from datetime import datetime
 
 # Configuration
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))  # ID administrateur
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+PERSIST_FILE = "file_storage.pkl"
 
-# Structure des données
-file_storage = {}
+# Initialisation du logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Structure des catégories
 MAIN_CATEGORIES = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
 SUB_CATEGORIES = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebook Messenger", 
                  "Audio", "Vidéo", "Documents", "Autres"]
 
 # États de conversation
-UPLOADING_FILE = 0
+UPLOADING_FILE, EDITING_FILE = range(2)
 
 # Helper pour créer des menus
 def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
@@ -37,13 +47,27 @@ def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
             keyboard.append(row)
             row = []
     
-    if row:  # Ajouter les boutons restants
+    if row:
         keyboard.append(row)
     
     if back_button:
         keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=back_data)])
     
     return InlineKeyboardMarkup(keyboard)
+
+# Sauvegarder l'état
+def save_file_storage(context, file_storage):
+    context.bot_data["file_storage"] = file_storage
+    with open(PERSIST_FILE, 'w') as f:
+        json.dump(file_storage, f)
+
+# Charger l'état
+def load_file_storage():
+    try:
+        with open(PERSIST_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 # Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,6 +91,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_file_to_user(query, context, data)
     elif data == "upload_file":
         await start_file_upload(query, context)
+    elif data == "manage_files":
+        await show_file_management(query, context)
+    elif data.startswith("delete_"):
+        await delete_file(query, context, data)
     elif data == "cancel_upload":
         await query.edit_message_text("❌ Upload annulé")
     elif data == "share_location":
@@ -104,6 +132,7 @@ async def show_subcategories_menu(query, context, category):
     # Ajouter bouton upload pour admin
     if query.from_user.id == ADMIN_ID:
         submenu_buttons.append("⬆️ Upload Fichier")
+        submenu_buttons.append("⚙️ Gérer Fichiers")
     
     await query.edit_message_text(
         f"📁 Catégorie : {category}\nSélectionnez une sous-catégorie :",
@@ -112,11 +141,9 @@ async def show_subcategories_menu(query, context, category):
 
 async def handle_subcategory(query, context, subcategory):
     category = context.user_data.get("current_category")
-    
-    # Stocker la sous-catégorie pour l'upload
     context.user_data["current_subcategory"] = subcategory
     
-    # Vérifier si des fichiers existent
+    file_storage = context.bot_data.get("file_storage", {})
     files = file_storage.get(category, {}).get(subcategory, [])
     
     if not files:
@@ -132,7 +159,6 @@ async def handle_subcategory(query, context, subcategory):
         )
         return
 
-    # Afficher les fichiers disponibles
     keyboard = []
     for idx, file_info in enumerate(files):
         keyboard.append([InlineKeyboardButton(
@@ -156,6 +182,7 @@ async def send_file_to_user(query, context, file_data):
         return
     
     file_idx = int(file_data.split('_')[1])
+    file_storage = context.bot_data.get("file_storage", {})
     files = file_storage.get(category, {}).get(subcategory, [])
     
     if file_idx >= len(files):
@@ -165,49 +192,23 @@ async def send_file_to_user(query, context, file_data):
     file_info = files[file_idx]
     
     try:
-        # Envoyer le fichier selon son type
         if file_info['type'] == 'document':
-            await context.bot.send_document(
-                chat_id=query.message.chat_id,
-                document=file_info["file_id"],
-                caption=f"📥 {file_info['name']}"
-            )
+            await context.bot.send_document(query.message.chat_id, file_info["file_id"], caption=f"📥 {file_info['name']}")
         elif file_info['type'] == 'photo':
-            await context.bot.send_photo(
-                chat_id=query.message.chat_id,
-                photo=file_info["file_id"],
-                caption=f"📸 {file_info['name']}"
-            )
+            await context.bot.send_photo(query.message.chat_id, file_info["file_id"], caption=f"📸 {file_info['name']}")
         elif file_info['type'] == 'audio':
-            await context.bot.send_audio(
-                chat_id=query.message.chat_id,
-                audio=file_info["file_id"],
-                caption=f"🎵 {file_info['name']}"
-            )
+            await context.bot.send_audio(query.message.chat_id, file_info["file_id"], caption=f"🎵 {file_info['name']}")
         elif file_info['type'] == 'video':
-            await context.bot.send_video(
-                chat_id=query.message.chat_id,
-                video=file_info["file_id"],
-                caption=f"🎬 {file_info['name']}"
-            )
+            await context.bot.send_video(query.message.chat_id, file_info["file_id"], caption=f"🎬 {file_info['name']}")
         elif file_info['type'] == 'voice':
-            await context.bot.send_voice(
-                chat_id=query.message.chat_id,
-                voice=file_info["file_id"],
-                caption=f"🎤 {file_info['name']}"
-            )
+            await context.bot.send_voice(query.message.chat_id, file_info["file_id"], caption=f"🎤 {file_info['name']}")
         else:
-            await context.bot.send_document(
-                chat_id=query.message.chat_id,
-                document=file_info["file_id"],
-                caption=f"📥 {file_info['name']}"
-            )
-            
+            await context.bot.send_document(query.message.chat_id, file_info["file_id"], caption=f"📥 {file_info['name']}")
     except Exception as e:
-        logging.error(f"Error sending file: {e}")
+        logger.error(f"Error sending file: {e}")
         await query.answer("❌ Erreur lors du téléchargement", show_alert=True)
 
-# Gestion de l'upload (admin seulement)
+# Gestion de l'upload
 async def start_file_upload(query, context):
     if query.from_user.id != ADMIN_ID:
         await query.answer("⛔ Action réservée à l'admin", show_alert=True)
@@ -238,7 +239,8 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
     category = user_data["upload_category"]
     subcategory = user_data["upload_subcategory"]
     
-    # Initialiser le stockage si nécessaire
+    file_storage = context.bot_data.get("file_storage", {})
+    
     if category not in file_storage:
         file_storage[category] = {}
     if subcategory not in file_storage[category]:
@@ -248,13 +250,12 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
     file_name = "Fichier"
     file_type = "document"
     
-    # Récupérer le fichier selon son type
     if update.message.document:
         file = update.message.document
         file_name = file.file_name or "document"
         file_type = "document"
     elif update.message.photo:
-        file = update.message.photo[-1]  # Meilleure qualité
+        file = update.message.photo[-1]
         file_name = "photo.jpg"
         file_type = "photo"
     elif update.message.audio:
@@ -274,24 +275,93 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         return UPLOADING_FILE
     
     if file:
-        # Stocker les métadonnées
-        file_storage[category][subcategory].append({
+        file_info = {
             "file_id": file.file_id,
             "name": file_name,
-            "type": file_type
-        })
+            "type": file_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "uploaded_by": update.message.from_user.id
+        }
+        
+        file_storage[category][subcategory].append(file_info)
+        context.bot_data["file_storage"] = file_storage
+        save_file_storage(context, file_storage)
         
         await update.message.reply_text(
             f"✅ Fichier ajouté avec succès à:\n"
             f"Catégorie: {category}\n"
             f"Sous-catégorie: {subcategory}\n\n"
-            f"Nom: {file_name}\n"
-            f"Type: {file_type}"
+            f"Nom: {file_name}"
         )
     else:
         await update.message.reply_text("❌ Format de fichier non supporté")
     
     return ConversationHandler.END
+
+# Gestion des fichiers (admin)
+async def show_file_management(query, context):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("⛔ Action réservée à l'admin", show_alert=True)
+        return
+    
+    category = context.user_data.get("current_category")
+    subcategory = context.user_data.get("current_subcategory")
+    
+    if not category or not subcategory:
+        await query.answer("❌ Catégorie non sélectionnée", show_alert=True)
+        return
+    
+    file_storage = context.bot_data.get("file_storage", {})
+    files = file_storage.get(category, {}).get(subcategory, [])
+    
+    if not files:
+        await query.answer("ℹ️ Aucun fichier à gérer", show_alert=True)
+        return
+    
+    keyboard = []
+    for idx, file_info in enumerate(files):
+        keyboard.append([
+            InlineKeyboardButton(f"🗑️ {file_info['name']}", callback_data=f"delete_{idx}")
+        ])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=category)])
+    
+    await query.edit_message_text(
+        f"⚙️ Gestion des fichiers ({category} > {subcategory}):\n"
+        "Cliquez sur un fichier pour le supprimer",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def delete_file(query, context, data):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("⛔ Action réservée à l'admin", show_alert=True)
+        return
+    
+    file_idx = int(data.split('_')[1])
+    category = context.user_data.get("current_category")
+    subcategory = context.user_data.get("current_subcategory")
+    
+    if not category or not subcategory:
+        await query.answer("❌ Catégorie non définie", show_alert=True)
+        return
+    
+    file_storage = context.bot_data.get("file_storage", {})
+    
+    if category in file_storage and subcategory in file_storage[category]:
+        if file_idx < len(file_storage[category][subcategory]):
+            deleted_file = file_storage[category][subcategory].pop(file_idx)
+            context.bot_data["file_storage"] = file_storage
+            save_file_storage(context, file_storage)
+            
+            # Si plus de fichiers, supprimer la sous-catégorie
+            if not file_storage[category][subcategory]:
+                del file_storage[category][subcategory]
+            
+            await query.answer(f"🗑️ Fichier supprimé: {deleted_file['name']}", show_alert=True)
+            await show_file_management(query, context)
+            return
+    
+    await query.answer("❌ Fichier introuvable", show_alert=True)
 
 async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Upload annulé")
@@ -308,9 +378,26 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Configuration principale
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Vérification des variables d'environnement
+    if not TOKEN or not ADMIN_ID:
+        logger.error("Les variables BOT_TOKEN et ADMIN_ID doivent être définies")
+        exit(1)
+    
+    # Initialiser la persistance
+    file_storage = load_file_storage()
+    persistence = PicklePersistence(
+        filepath=PERSIST_FILE,
+        store_data=PersistenceInput(bot_data=True)
+    
+    app = ApplicationBuilder() \
+        .token(TOKEN) \
+        .persistence(persistence) \
+        .build()
+    
+    # Stocker les données initiales
+    app.bot_data["file_storage"] = file_storage
 
-    # CORRECTION FINALE: Filtres corrects pour la version 20.x
+    # Handler de conversation pour l'upload
     upload_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_file_upload, pattern="^upload_file$")],
         states={
@@ -334,5 +421,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(upload_conv_handler)
 
-    print("🤖 Bot en cours d'exécution...")
+    logger.info("🤖 Bot en cours d'exécution...")
     app.run_polling()
