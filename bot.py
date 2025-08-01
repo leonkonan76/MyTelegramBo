@@ -121,13 +121,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    app.add_handler(MessageHandler(
-        filters.Document.ALL |
-        filters.Audio.ALL |
-        filters.Video.ALL |
-        filters.Photo,
-        upload_file_handler
-    ))
+    app.add_handler(MessageHandler(filters.ATTACHMENT, upload_file_handler))
 
     print("✅ Bot en cours d'exécution...")
     app.run_polling()
