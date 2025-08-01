@@ -1,0 +1,1 @@
+TOKEN = "TON_TOKEN_TELEGRAM_ICI"  # Remplace par ton vrai token
