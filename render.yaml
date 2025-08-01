@@ -1,7 +1,7 @@
 disks:
   - name: bot-data
     mountPath: /data
-    sizeGB: 1
+    sizeGB: 50
 
 services:
   - type: web
@@ -12,7 +12,7 @@ services:
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
-        value: ton_token_telegram_ici
+        value: votre_token_telegram_ici
       - key: ADMIN_ID
         value: votre_id_telegram_ici
     disks:
