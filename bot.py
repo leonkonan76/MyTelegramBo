@@ -1,4 +1,4 @@
-# bot.py (version corrigée)
+# bot.py (version finale corrigée)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -34,7 +34,7 @@ SUB_CATEGORIES = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebo
                  "Audio", "Vidéo", "Documents", "Autres"]
 
 # États de conversation
-UPLOADING_FILE, EDITING_FILE = range(2)
+UPLOADING_FILE = 0
 
 # Helper pour créer des menus
 def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
@@ -280,6 +280,10 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file_storage[category][subcategory].append(file_info)
         context.bot_data["file_storage"] = file_storage
         
+        # Sauvegarder dans un fichier
+        with open(PERSIST_FILE, 'w') as f:
+            json.dump(file_storage, f)
+        
         await update.message.reply_text(
             f"✅ Fichier ajouté avec succès à:\n"
             f"Catégorie: {category}\n"
@@ -348,6 +352,11 @@ async def delete_file(query, context, data):
             if not file_storage[category][subcategory]:
                 del file_storage[category][subcategory]
             
+            # Sauvegarder les modifications
+            context.bot_data["file_storage"] = file_storage
+            with open(PERSIST_FILE, 'w') as f:
+                json.dump(file_storage, f)
+            
             await query.answer(f"🗑️ Fichier supprimé: {deleted_file['name']}", show_alert=True)
             await show_file_management(query, context)
             return
@@ -374,19 +383,16 @@ if __name__ == '__main__':
         logger.error("Les variables BOT_TOKEN et ADMIN_ID doivent être définies")
         exit(1)
     
-    # Initialiser la persistance
-    persistence = PicklePersistence(
-        filepath=PERSIST_FILE,
-        store_data=PersistenceInput(bot_data=True)
+    # Charger le stockage initial
+    file_storage = load_initial_storage()
     
+    # Créer l'application sans persistance complexe
     app = ApplicationBuilder() \
         .token(TOKEN) \
-        .persistence(persistence) \
         .build()
     
-    # Initialiser le stockage de fichiers
-    if 'file_storage' not in app.bot_data:
-        app.bot_data['file_storage'] = load_initial_storage()
+    # Stocker les données initiales
+    app.bot_data["file_storage"] = file_storage
 
     # Handler de conversation pour l'upload
     upload_conv_handler = ConversationHandler(
