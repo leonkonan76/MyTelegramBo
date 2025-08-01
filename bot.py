@@ -2,48 +2,59 @@ from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboard
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ConversationHandler
 import os
 import json
-import aiofiles
+import telegram
 
+# Afficher la version pour débogage
+print(f"Version de python-telegram-bot : {telegram.__version__}")
+
+# Variables d'environnement
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # Remplacez par votre ID Telegram via Render
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+DATA_PATH = "/data/files.json"
 
+# Catégories et sous-catégories
 main_buttons = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
 sub_buttons = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
 
-DATA_PATH = "/data/files.json"
-files_db = None
-UPLOAD_MAIN, UPLOAD_SUB, UPLOAD_FILE = range(3)
+# Base de données des fichiers (global)
+files_db = {}
 
-async def load_files_db():
+# États pour le ConversationHandler
+SELECT_MAIN, SELECT_SUB, UPLOAD_FILE = range(3)
+
+# Fonctions pour charger et sauvegarder les fichiers
+def load_files_db():
     global files_db
-    try:
-        async with aiofiles.open(DATA_PATH, mode='r') as f:
-            data = json.loads(await f.read())
-            files_db = data
-    except FileNotFoundError:
+    if os.path.exists(DATA_PATH):
+        with open(DATA_PATH, 'r') as f:
+            files_db = json.load(f)
+    else:
         files_db = {main: {sub: [] for sub in sub_buttons} for main in main_buttons if main != "Géolocalisation"}
-    except json.JSONDecodeError:
-        print("Erreur de décodage JSON, initialisation avec une base de données vide")
-        files_db = {main: {sub: [] for sub in sub_buttons} for main in main_buttons if main != "Géolocalisation"}
+        save_files_db()
 
-async def save_files_db():
-    data = json.dumps(files_db)
-    async with aiofiles.open(DATA_PATH, mode='w') as f:
-        await f.write(data)
+def save_files_db():
+    with open(DATA_PATH, 'w') as f:
+        json.dump(files_db, f)
 
+# Menus
 def get_main_menu():
     keyboard = [[InlineKeyboardButton(text=btn, callback_data=btn)] for btn in main_buttons]
     return InlineKeyboardMarkup(keyboard)
 
-def get_sub_menu(main, is_admin=False):
+def get_sub_menu(main):
     keyboard = [[InlineKeyboardButton(text=sub, callback_data=f"{main}_{sub}")] for sub in sub_buttons]
-    if main in files_db:
-        for idx, file_id in enumerate(files_db[main].get(sub, []), 1):
-            keyboard.append([InlineKeyboardButton(text=f"Fichier {idx}", callback_data=f"download_{file_id}")])
-            if is_admin:
-                keyboard.append([InlineKeyboardButton(text=f"Supprimer Fichier {idx}", callback_data=f"delete_{main}_{sub}_{idx-1}")])
     return InlineKeyboardMarkup(keyboard)
 
+def get_files_menu(main, sub, is_admin=False):
+    keyboard = []
+    if main in files_db and sub in files_db[main]:
+        for i, file_id in enumerate(files_db[main][sub]):
+            keyboard.append([InlineKeyboardButton(text=f"Fichier {i+1}", callback_data=f"download_{main}_{sub}_{i}")])
+            if is_admin:
+                keyboard.append([InlineKeyboardButton(text=f"Supprimer Fichier {i+1}", callback_data=f"delete_{main}_{sub}_{i}")])
+    return InlineKeyboardMarkup(keyboard)
+
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bienvenue dans le bot MyTelegramBot. Choisissez une option :", reply_markup=get_main_menu())
 
@@ -62,51 +73,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await query.message.reply_text("Merci de partager votre position :", reply_markup=keyboard)
         else:
-            reply_markup = get_sub_menu(data, is_admin)
+            reply_markup = get_sub_menu(data)
             await query.message.reply_text(f"Vous avez choisi {data}. Voici les options disponibles :", reply_markup=reply_markup)
-    else:
-        if data.startswith("download_"):
-            file_id = data.split("_", 1)[1]
-            await query.message.reply_document(document=file_id)
-        elif data.startswith("delete_") and is_admin:
-            parts = data.split("_", 3)
-            if len(parts) == 4:
-                _, main, sub, idx = parts
-                try:
-                    idx = int(idx)
-                    if main in files_db and sub in files_db[main] and idx < len(files_db[main][sub]):
-                        files_db[main][sub].pop(idx)
-                        await save_files_db()
-                        await query.message.reply_text(f"Fichier supprimé de {main} > {sub}.")
-                    else:
-                        await query.message.reply_text("Fichier non trouvé.")
-                except ValueError:
-                    await query.message.reply_text("Index invalide.")
-            else:
-                await query.message.reply_text("Demande invalide.")
-        elif data.startswith("delete_"):
-            await query.message.reply_text("Seul l'administrateur peut supprimer des fichiers.")
-        elif "_" in data:
-            parts = data.split("_", 1)
-            if len(parts) == 2:
-                main, sub = parts
-                if main in files_db and sub in files_db[main]:
-                    files = files_db[main][sub]
-                    if files:
-                        keyboard = [[InlineKeyboardButton(text=f"Fichier {i+1}", callback_data=f"download_{file_id}")] for i, file_id in enumerate(files)]
-                        if is_admin:
-                            for i, file_id in enumerate(files):
-                                keyboard.append([InlineKeyboardButton(text=f"Supprimer Fichier {i+1}", callback_data=f"delete_{main}_{sub}_{i}")])
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        await query.message.reply_text(f"Fichiers pour {main} > {sub} :", reply_markup=reply_markup)
-                    else:
-                        await query.message.reply_text(f"Aucun fichier pour {main} > {sub}.")
+    elif data.startswith("download_"):
+        parts = data.split("_", 3)
+        if len(parts) == 4:
+            _, main, sub, index_str = parts
+            try:
+                index = int(index_str)
+                if main in files_db and sub in files_db[main] and index < len(files_db[main][sub]):
+                    file_id = files_db[main][sub][index]
+                    await query.message.reply_document(document=file_id)
                 else:
-                    await query.message.reply_text("Catégorie ou sous-catégorie non trouvée.")
-            else:
-                await query.message.reply_text("Donnée invalide.")
+                    await query.message.reply_text("Fichier non trouvé.")
+            except ValueError:
+                await query.message.reply_text("Index invalide.")
         else:
-            await query.message.reply_text(f"Vous avez sélectionné : {data}")
+            await query.message.reply_text("Demande invalide.")
+    elif data.startswith("delete_") and is_admin:
+        parts = data.split("_", 3)
+        if len(parts) == 4:
+            _, main, sub, index_str = parts
+            try:
+                index = int(index_str)
+                if main in files_db and sub in files_db[main] and index < len(files_db[main][sub]):
+                    del files_db[main][sub][index]
+                    save_files_db()
+                    await query.message.reply_text(f"Fichier supprimé de {main} > {sub}.")
+                    reply_markup = get_files_menu(main, sub, is_admin)
+                    await query.message.reply_text(f"Fichiers mis à jour pour {main} > {sub} :", reply_markup=reply_markup)
+                else:
+                    await query.message.reply_text("Fichier non trouvé.")
+            except ValueError:
+                await query.message.reply_text("Index invalide.")
+        else:
+            await query.message.reply_text("Demande invalide.")
+    elif "_" in data:
+        parts = data.split("_", 1)
+        if len(parts) == 2 and parts[0] in main_buttons and parts[1] in sub_buttons:
+            main, sub = parts
+            reply_markup = get_files_menu(main, sub, is_admin)
+            await query.message.reply_text(f"Fichiers pour {main} > {sub} :", reply_markup=reply_markup)
+        else:
+            await query.message.reply_text("Donnée invalide.")
+    else:
+        await query.message.reply_text(f"Vous avez sélectionné : {data}")
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.location:
@@ -118,10 +129,8 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Seul l'administrateur peut utiliser cette commande.")
         return ConversationHandler.END
-    keyboard = [[InlineKeyboardButton(text=main, callback_data=main)] for main in main_buttons if main != "Géolocalisation"]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Veuillez sélectionner une catégorie principale :", reply_markup=reply_markup)
-    return UPLOAD_MAIN
+    await update.message.reply_text("Veuillez sélectionner une catégorie principale :", reply_markup=get_main_menu())
+    return SELECT_MAIN
 
 async def select_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -132,7 +141,7 @@ async def select_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton(text=sub, callback_data=sub)] for sub in sub_buttons]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text(f"Vous avez sélectionné {data}. Veuillez maintenant sélectionner une sous-catégorie :", reply_markup=reply_markup)
-        return UPLOAD_SUB
+        return SELECT_SUB
     else:
         await query.message.reply_text("Catégorie non valide.")
         return ConversationHandler.END
@@ -156,7 +165,7 @@ async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sub = context.user_data.get('sub')
         if main and sub and main in files_db and sub in files_db[main]:
             files_db[main][sub].append(file_id)
-            await save_files_db()
+            save_files_db()
             await update.message.reply_text(f"Fichier téléchargé avec succès pour {main} > {sub}.")
             return ConversationHandler.END
         else:
@@ -167,24 +176,28 @@ async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return UPLOAD_FILE
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Seul l'administrateur peut envoyer des fichiers via la commande /upload.")
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Seul l'administrateur peut envoyer des fichiers via la commande /upload.")
 
+# Point d'entrée principal
 if __name__ == '__main__':
+    load_files_db()
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_startup(load_files_db)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("upload", upload_start)],
         states={
-            UPLOAD_MAIN: [CallbackQueryHandler(select_main)],
-            UPLOAD_SUB: [CallbackQueryHandler(select_sub)],
+            SELECT_MAIN: [CallbackQueryHandler(select_main)],
+            SELECT_SUB: [CallbackQueryHandler(select_sub)],
             UPLOAD_FILE: [MessageHandler(filters.Document.ALL, upload_file)],
         },
         fallbacks=[],
     )
     app.add_handler(conv_handler)
     app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, handle_document))
+
     print("Bot en cours d'exécution...")
     app.run_polling()
