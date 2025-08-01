@@ -1,193 +1,275 @@
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ConversationHandler
 import os
 import json
-import telegram
+import logging
+from uuid import uuid4
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
 
-# Afficher la version pour débogage
-print(f"Version de python-telegram-bot : {telegram.__version__}")
+# Configuration du logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# Variables d'environnement
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-DATA_PATH = "/data/files.json"
+# Configuration des variables d'environnement
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Remplacez par votre ID Telegram
+STORAGE_PATH = os.getenv("STORAGE_PATH", "file_storage.json")
 
-# Catégories et sous-catégories
-main_buttons = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
-sub_buttons = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
+# Structure des catégories
+CATEGORIES = {
+    "KF": ["SMS", "Contacts", "Historiques appels"],
+    "BELO": ["iMessenger", "Facebook Messenger"],
+    "SOULAN": ["Audio", "Vidéo"],
+    "KfClone": ["Documents", "Autres"],
+    "Filtres": [],
+    "Géolocalisation": [],
+}
 
-# États pour le ConversationHandler
-SELECT_MAIN, SELECT_SUB, UPLOAD_FILE = range(3)
-
-# Fonctions pour charger et sauvegarder les fichiers
-def load_files_db():
-    if os.path.exists(DATA_PATH):
-        with open(DATA_PATH, 'r') as f:
+# Initialisation du stockage
+def load_storage():
+    try:
+        with open(STORAGE_PATH, 'r') as f:
             return json.load(f)
-    else:
-        return {main: {sub: [] for sub in sub_buttons} for main in main_buttons if main != "Géolocalisation"}
+    except FileNotFoundError:
+        return {"files": {}, "logs": []}
 
-def save_files_db(files_db):
-    with open(DATA_PATH, 'w') as f:
-        json.dump(files_db, f)
+def save_storage(data):
+    with open(STORAGE_PATH, 'w') as f:
+        json.dump(data, f, indent=4)
 
-# Charger la base de données des fichiers
-files_db = load_files_db()
+STORAGE = load_storage()
 
-# Menus
+# Fonctions utilitaires
+def log_action(user_id, action, details):
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id,
+        "action": action,
+        "details": details
+    }
+    STORAGE["logs"].append(log_entry)
+    save_storage(STORAGE)
+    logger.info(f"Log: {log_entry}")
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
 def get_main_menu():
-    keyboard = [[InlineKeyboardButton(text=btn, callback_data=btn)] for btn in main_buttons]
+    keyboard = [
+        [InlineKeyboardButton(cat, callback_data=f"cat_{cat}") for cat in CATEGORIES.keys()]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_sub_menu(main):
-    keyboard = []
-    for sub in sub_buttons:
-        file_count = len(files_db.get(main, {}).get(sub, []))
-        text = f"{sub} ({file_count})"
-        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"{main}_{sub}")])
+def get_subcategory_menu(category):
+    subcategories = CATEGORIES.get(category, [])
+    keyboard = [
+        [InlineKeyboardButton(subcat, callback_data=f"subcat_{category}_{subcat}") for subcat in subcategories]
+    ]
+    keyboard.append([InlineKeyboardButton("Retour", callback_data="back_main")])
+    if is_admin:  # Bouton upload pour admin
+        keyboard.insert(0, [InlineKeyboardButton("Uploader fichier", callback_data=f"upload_{category}")])
     return InlineKeyboardMarkup(keyboard)
 
-def get_files_menu(main, sub, is_admin=False):
-    keyboard = []
-    if main in files_db and sub in files_db[main]:
-        for i, file_id in enumerate(files_db[main][sub]):
-            keyboard.append([InlineKeyboardButton(text=f"Fichier {i+1}", callback_data=f"download_{file_id}")])
-            if is_admin:
-                keyboard.append([InlineKeyboardButton(text=f"Supprimer Fichier {i+1}", callback_data=f"delete_{main}_{sub}_{i}")])
+def get_files_menu(category, subcategory):
+    files = [
+        f for f, data in STORAGE["files"].items()
+        if data["category"] == category and data["subcategory"] == subcategory
+    ]
+    keyboard = [
+        [InlineKeyboardButton(f"File: {f[:20]}...", callback_data=f"file_{f}")]
+        for f in files
+    ]
+    keyboard.append([InlineKeyboardButton("Retour", callback_data=f"back_{category}")])
+    if is_admin:  # Bouton suppression pour admin
+        keyboard.insert(0, [InlineKeyboardButton("Supprimer fichier", callback_data=f"delete_{category}_{subcategory}")])
     return InlineKeyboardMarkup(keyboard)
 
 # Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bienvenue dans le bot MyTelegramBot. Choisissez une option :", reply_markup=get_main_menu())
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    is_admin = query.from_user.id == ADMIN_ID
-
-    if data in main_buttons:
-        if data == "Géolocalisation":
-            keyboard = ReplyKeyboardMarkup(
-                [[KeyboardButton("Envoyer ma position", request_location=True)]],
-                resize_keyboard=True,
-                one_time_keyboard=True
-            )
-            await query.message.reply_text("Merci de partager votre position :", reply_markup=keyboard)
-        else:
-            reply_markup = get_sub_menu(data)
-            await query.message.reply_text(f"Vous avez choisi {data}. Voici les options disponibles :", reply_markup=reply_markup)
-    elif "_" in data and len(data.split("_")) == 2:
-        main, sub = data.split("_")
-        reply_markup = get_files_menu(main, sub, is_admin)
-        await query.message.reply_text(f"Fichiers pour {main} > {sub} :", reply_markup=reply_markup)
-    elif data.startswith("download_"):
-        file_id = data.split("_", 1)[1]
-        await query.message.reply_document(document=file_id)
-    elif data.startswith("delete_") and is_admin:
-        parts = data.split("_", 3)
-        if len(parts) == 4 and parts[0] == "delete":
-            main, sub, index_str = parts[1], parts[2], parts[3]
-            try:
-                index = int(index_str)
-                if main in files_db and sub in files_db[main] and index < len(files_db[main][sub]):
-                    del files_db[main][sub][index]
-                    save_files_db(files_db)
-                    await query.message.reply_text(f"Fichier supprimé de {main} > {sub}.")
-                    reply_markup = get_files_menu(main, sub, is_admin)
-                    await query.message.reply_text(f"Fichiers mis à jour pour {main} > {sub} :", reply_markup=reply_markup)
-                else:
-                    await query.message.reply_text("Fichier non trouvé.")
-            except ValueError:
-                await query.message.reply_text("Index invalide.")
-        else:
-            await query.message.reply_text("Demande invalide.")
-    else:
-        await query.message.reply_text(f"Vous avez sélectionné : {data}")
-
-async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.location:
-        lat = update.message.location.latitude
-        lon = update.message.location.longitude
-        await update.message.reply_text(f"Localisation reçue :\nLatitude: {lat}\nLongitude: {lon}")
-
-async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Seul l'administrateur peut utiliser cette commande.")
-        return ConversationHandler.END
-    await update.message.reply_text("Veuillez sélectionner une catégorie principale :", reply_markup=get_main_menu())
-    return SELECT_MAIN
-
-async def select_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data in main_buttons and data != "Géolocalisation":
-        context.user_data['main'] = data
-        keyboard = [[InlineKeyboardButton(text=sub, callback_data=sub)] for sub in sub_buttons]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text(f"Vous avez sélectionné {data}. Veuillez maintenant sélectionner une sous-catégorie :", reply_markup=reply_markup)
-        return SELECT_SUB
-    else:
-        await query.message.reply_text("Catégorie non valide pour le téléchargement.")
-        return ConversationHandler.END
-
-async def select_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data in sub_buttons:
-        context.user_data['sub'] = data
-        await query.message.reply_text(f"Vous avez sélectionné {context.user_data['main']} > {data}. Veuillez maintenant envoyer le fichier.")
-        return UPLOAD_FILE
-    else:
-        await query.message.reply_text("Sous-catégorie non valide.")
-        return ConversationHandler.END
-
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.document:
-        file_id = update.message.document.file_id
-        main = context.user_data.get('main')
-        sub = context.user_data.get('sub')
-        if main and sub:
-            if main not in files_db:
-                files_db[main] = {}
-            if sub not in files_db[main]:
-                files_db[main][sub] = []
-            files_db[main][sub].append(file_id)
-            save_files_db(files_db)
-            await update.message.reply_text(f"Fichier téléchargé avec succès pour {main} > {sub}.")
-            return ConversationHandler.END
-        else:
-            await update.message.reply_text("Erreur: catégorie ou sous-catégorie non sélectionnée.")
-            return ConversationHandler.END
-    else:
-        await update.message.reply_text("Veuillez envoyer un document.")
-        return UPLOAD_FILE
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Seul l'administrateur peut envoyer des fichiers via la commande /upload.")
-
-# Point d'entrée principal
-if __name__ == '__main__':
-    load_files_db()
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("upload", upload_start)],
-        states={
-            SELECT_MAIN: [CallbackQueryHandler(select_main)],
-            SELECT_SUB: [CallbackQueryHandler(select_sub)],
-            UPLOAD_FILE: [MessageHandler(filters.Document.ALL, upload_file)],
-        },
-        fallbacks=[],
+    user_id = update.effective_user.id
+    log_action(user_id, "start", "Commande /start exécutée")
+    await update.message.reply_text(
+        "Bienvenue sur @konntek_bot ! 📁\nChoisissez une catégorie :",
+        reply_markup=get_main_menu()
     )
-    app.add_handler(conv_handler)
-    app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, handle_document))
 
-    print("Bot en cours d'exécution...")
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "back_main":
+        await query.edit_message_text(
+            "Choisissez une catégorie :",
+            reply_markup=get_main_menu()
+        )
+        return
+
+    if data.startswith("cat_"):
+        category = data[4:]
+        log_action(user_id, "view_category", f"Catégorie : {category}")
+        await query.edit_message_text(
+            f"Catégorie : {category}\nChoisissez une sous-catégorie :",
+            reply_markup=get_subcategory_menu(category)
+        )
+        return
+
+    if data.startswith("subcat_"):
+        _, category, subcategory = data.split("_", 2)
+        log_action(user_id, "view_subcategory", f"Sous-catégorie : {subcategory}")
+        await query.edit_message_text(
+            f"Sous-catégorie : {subcategory}\nFichiers disponibles :",
+            reply_markup=get_files_menu(category, subcategory)
+        )
+        return
+
+    if data.startswith("back_"):
+        category = data[5:]
+        await query.edit_message_text(
+            f"Catégorie : {category}\nChoisissez une sous-catégorie :",
+            reply_markup=get_subcategory_menu(category)
+        )
+        return
+
+    if data.startswith("file_"):
+        file_id = data[5:]
+        file_data = STORAGE["files"].get(file_id)
+        if file_data:
+            log_action(user_id, "download_file", f"Fichier : {file_id}")
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_data["file_id"],
+                caption=f"Fichier : {file_id}"
+            )
+        return
+
+    if data.startswith("upload_"):
+        category = data[7:]
+        context.user_data["upload_category"] = category
+        await query.message.reply_text(
+            f"Envoyez le fichier à uploader dans {category} (admin uniquement)."
+        )
+        return
+
+    if data.startswith("delete_"):
+        _, category, subcategory = data.split("_", 2)
+        context.user_data["delete_mode"] = {"category": category, "subcategory": subcategory}
+        await query.message.reply_text(
+            "Envoyez le nom du fichier à supprimer (admin uniquement)."
+        )
+        return
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Action réservée aux administrateurs.")
+        return
+
+    category = context.user_data.get("upload_category")
+    if not category:
+        await update.message.reply_text("Veuillez sélectionner une catégorie d'abord.")
+        return
+
+    file = None
+    file_type = None
+    if update.message.document:
+        file = update.message.document
+        file_type = "document"
+    elif update.message.photo:
+        file = update.message.photo[-1]  # Prendre la plus haute résolution
+        file_type = "photo"
+    elif update.message.audio:
+        file = update.message.audio
+        file_type = "audio"
+    elif update.message.video:
+        file = update.message.video
+        file_type = "video"
+    elif update.message.voice:
+        file = update.message.voice
+        file_type = "voice"
+
+    if file:
+        file_id = file.file_id
+        file_name = f"{uuid4()}_{file.file_name or 'file'}"
+        STORAGE["files"][file_name] = {
+            "file_id": file_id,
+            "category": category,
+            "subcategory": context.user_data.get("upload_subcategory", "Autres"),
+            "type": file_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "uploader_id": user_id
+        }
+        save_storage(STORAGE)
+        log_action(user_id, "upload_file", f"Fichier : {file_name} dans {category}")
+        await update.message.reply_text(f"Fichier {file_name} uploadé avec succès !")
+        context.user_data.clear()
+    else:
+        await update.message.reply_text("Type de fichier non supporté.")
+
+async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Action réservée aux administrateurs.")
+        return
+
+    delete_mode = context.user_data.get("delete_mode")
+    if not delete_mode:
+        await update.message.reply_text("Veuillez sélectionner une sous-catégorie d'abord.")
+        return
+
+    file_name = update.message.text.strip()
+    if file_name in STORAGE["files"]:
+        file_data = STORAGE["files"][file_name]
+        if (file_data["category"] == delete_mode["category"] and
+                file_data["subcategory"] == delete_mode["subcategory"]):
+            del STORAGE["files"][file_name]
+            save_storage(STORAGE)
+            log_action(user_id, "delete_file", f"Fichier : {file_name}")
+            await update.message.reply_text(f"Fichier {file_name} supprimé avec succès !")
+        else:
+            await update.message.reply_text("Fichier non trouvé dans cette catégorie.")
+    else:
+        await update.message.reply_text("Fichier non trouvé.")
+    context.user_data.clear()
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    location = update.message.location
+    if location:
+        log_action(user_id, "share_location", f"Coordonnées : {location.latitude}, {location.longitude}")
+        await update.message.reply_text(
+            f"Position reçue !\nLatitude : {location.latitude}\nLongitude : {location.longitude}"
+        )
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Erreur : {context.error}")
+    if update:
+        await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    # Handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VIDEO | filters.VOICE, handle_file))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delete))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_error_handler(error_handler)
+
+    # Démarrage
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
