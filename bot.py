@@ -16,25 +16,23 @@ DATA_PATH = "/data/files.json"
 main_buttons = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
 sub_buttons = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
 
-# Base de données des fichiers (global)
-files_db = {}
-
 # États pour le ConversationHandler
 SELECT_MAIN, SELECT_SUB, UPLOAD_FILE = range(3)
 
 # Fonctions pour charger et sauvegarder les fichiers
 def load_files_db():
-    global files_db
     if os.path.exists(DATA_PATH):
         with open(DATA_PATH, 'r') as f:
-            files_db = json.load(f)
+            return json.load(f)
     else:
-        files_db = {main: {sub: [] for sub in sub_buttons} for main in main_buttons if main != "Géolocalisation"}
-        save_files_db()
+        return {main: {sub: [] for sub in sub_buttons} for main in main_buttons if main != "Géolocalisation"}
 
-def save_files_db():
+def save_files_db(files_db):
     with open(DATA_PATH, 'w') as f:
         json.dump(files_db, f)
+
+# Charger la base de données des fichiers
+files_db = load_files_db()
 
 # Menus
 def get_main_menu():
@@ -42,14 +40,18 @@ def get_main_menu():
     return InlineKeyboardMarkup(keyboard)
 
 def get_sub_menu(main):
-    keyboard = [[InlineKeyboardButton(text=sub, callback_data=f"{main}_{sub}")] for sub in sub_buttons]
+    keyboard = []
+    for sub in sub_buttons:
+        file_count = len(files_db.get(main, {}).get(sub, []))
+        text = f"{sub} ({file_count})"
+        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"{main}_{sub}")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_files_menu(main, sub, is_admin=False):
     keyboard = []
     if main in files_db and sub in files_db[main]:
         for i, file_id in enumerate(files_db[main][sub]):
-            keyboard.append([InlineKeyboardButton(text=f"Fichier {i+1}", callback_data=f"download_{main}_{sub}_{i}")])
+            keyboard.append([InlineKeyboardButton(text=f"Fichier {i+1}", callback_data=f"download_{file_id}")])
             if is_admin:
                 keyboard.append([InlineKeyboardButton(text=f"Supprimer Fichier {i+1}", callback_data=f"delete_{main}_{sub}_{i}")])
     return InlineKeyboardMarkup(keyboard)
@@ -75,30 +77,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             reply_markup = get_sub_menu(data)
             await query.message.reply_text(f"Vous avez choisi {data}. Voici les options disponibles :", reply_markup=reply_markup)
+    elif "_" in data and len(data.split("_")) == 2:
+        main, sub = data.split("_")
+        reply_markup = get_files_menu(main, sub, is_admin)
+        await query.message.reply_text(f"Fichiers pour {main} > {sub} :", reply_markup=reply_markup)
     elif data.startswith("download_"):
-        parts = data.split("_", 3)
-        if len(parts) == 4:
-            _, main, sub, index_str = parts
-            try:
-                index = int(index_str)
-                if main in files_db and sub in files_db[main] and index < len(files_db[main][sub]):
-                    file_id = files_db[main][sub][index]
-                    await query.message.reply_document(document=file_id)
-                else:
-                    await query.message.reply_text("Fichier non trouvé.")
-            except ValueError:
-                await query.message.reply_text("Index invalide.")
-        else:
-            await query.message.reply_text("Demande invalide.")
+        file_id = data.split("_", 1)[1]
+        await query.message.reply_document(document=file_id)
     elif data.startswith("delete_") and is_admin:
         parts = data.split("_", 3)
-        if len(parts) == 4:
-            _, main, sub, index_str = parts
+        if len(parts) == 4 and parts[0] == "delete":
+            main, sub, index_str = parts[1], parts[2], parts[3]
             try:
                 index = int(index_str)
                 if main in files_db and sub in files_db[main] and index < len(files_db[main][sub]):
                     del files_db[main][sub][index]
-                    save_files_db()
+                    save_files_db(files_db)
                     await query.message.reply_text(f"Fichier supprimé de {main} > {sub}.")
                     reply_markup = get_files_menu(main, sub, is_admin)
                     await query.message.reply_text(f"Fichiers mis à jour pour {main} > {sub} :", reply_markup=reply_markup)
@@ -108,14 +102,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("Index invalide.")
         else:
             await query.message.reply_text("Demande invalide.")
-    elif "_" in data:
-        parts = data.split("_", 1)
-        if len(parts) == 2 and parts[0] in main_buttons and parts[1] in sub_buttons:
-            main, sub = parts
-            reply_markup = get_files_menu(main, sub, is_admin)
-            await query.message.reply_text(f"Fichiers pour {main} > {sub} :", reply_markup=reply_markup)
-        else:
-            await query.message.reply_text("Donnée invalide.")
     else:
         await query.message.reply_text(f"Vous avez sélectionné : {data}")
 
@@ -143,7 +129,7 @@ async def select_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"Vous avez sélectionné {data}. Veuillez maintenant sélectionner une sous-catégorie :", reply_markup=reply_markup)
         return SELECT_SUB
     else:
-        await query.message.reply_text("Catégorie non valide.")
+        await query.message.reply_text("Catégorie non valide pour le téléchargement.")
         return ConversationHandler.END
 
 async def select_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,9 +149,13 @@ async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = update.message.document.file_id
         main = context.user_data.get('main')
         sub = context.user_data.get('sub')
-        if main and sub and main in files_db and sub in files_db[main]:
+        if main and sub:
+            if main not in files_db:
+                files_db[main] = {}
+            if sub not in files_db[main]:
+                files_db[main][sub] = []
             files_db[main][sub].append(file_id)
-            save_files_db()
+            save_files_db(files_db)
             await update.message.reply_text(f"Fichier téléchargé avec succès pour {main} > {sub}.")
             return ConversationHandler.END
         else:
