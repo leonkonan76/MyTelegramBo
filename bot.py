@@ -1,177 +1,133 @@
-import json
-import os
-from telegram import (
-    Update, KeyboardButton, ReplyKeyboardMarkup,
-    InlineKeyboardButton, InlineKeyboardMarkup
-)
-from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler,
-    MessageHandler, filters, CallbackQueryHandler
-)
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+import os, json
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 123456789  # Remplace par ton ID
-FILES_DB_PATH = "files.json"
+ADMIN_ID = os.getenv("ADMIN_ID") or "123456789"  # Remplace par ton vrai ID admin ou mets-le dans Render
 
 main_buttons = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
 sub_buttons = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
 
-# Chargement ou initialisation du fichier JSON
-def load_files_db():
-    if os.path.exists(FILES_DB_PATH):
+# Chargement/Sauvegarde JSON persistante
+FILES_DB_PATH = "files.json"
+def load_files():
+    try:
         with open(FILES_DB_PATH, "r") as f:
             return json.load(f)
-    return {cat: {sub: [] for sub in sub_buttons} for cat in main_buttons if cat != "Géolocalisation"}
+    except:
+        return {}
 
-def save_files_db():
+def save_files():
     with open(FILES_DB_PATH, "w") as f:
-        json.dump(files_db, f)
+        json.dump(files_db, f, indent=2)
 
-files_db = load_files_db()
+files_db = load_files()
 
 def get_main_menu():
-    keyboard = [[InlineKeyboardButton(text=btn, callback_data=f"cat|{btn}")] for btn in main_buttons]
+    keyboard = [[InlineKeyboardButton(text=btn, callback_data=btn)] for btn in main_buttons]
     return InlineKeyboardMarkup(keyboard)
 
-def get_sub_menu(category):
-    keyboard = [[InlineKeyboardButton(text=sub, callback_data=f"subcat|{category}|{sub}")] for sub in sub_buttons]
-    keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data="start")])
-    return InlineKeyboardMarkup(keyboard)
-
-def get_files_menu(category, subcat):
-    files = files_db.get(category, {}).get(subcat, [])
-    keyboard = [[InlineKeyboardButton(f["filename"], callback_data=f"file|{category}|{subcat}|{i}")] for i, f in enumerate(files)]
-    keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"cat|{category}")])
+def get_sub_menu():
+    keyboard = [[InlineKeyboardButton(text=sub, callback_data=sub)] for sub in sub_buttons]
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    name = user.first_name or "utilisateur"
-    await update.message.reply_text(f"Bienvenue {name} 👋\nChoisissez une catégorie :", reply_markup=get_main_menu())
+    username = update.effective_user.first_name or "utilisateur"
+    await update.message.reply_text(
+        f"👋 Bienvenue {username} dans le bot MyTelegramBot. Choisissez une option :",
+        reply_markup=get_main_menu()
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "start":
-        await query.edit_message_text("Choisissez une catégorie :", reply_markup=get_main_menu())
-    elif data.startswith("cat|"):
-        _, cat = data.split("|", 1)
-        if cat == "Géolocalisation":
+    if data in main_buttons:
+        if data == "Géolocalisation":
             keyboard = ReplyKeyboardMarkup(
                 [[KeyboardButton("Envoyer ma position", request_location=True)]],
-                resize_keyboard=True, one_time_keyboard=True
+                resize_keyboard=True,
+                one_time_keyboard=True
             )
-            await query.message.reply_text("Merci de partager votre position :", reply_markup=keyboard)
+            await query.message.reply_text("📍 Merci de partager votre position :", reply_markup=keyboard)
         else:
-            await query.edit_message_text(f"Sous-catégories de {cat} :", reply_markup=get_sub_menu(cat))
-    elif data.startswith("subcat|"):
-        _, cat, sub = data.split("|", 2)
-        await query.edit_message_text(f"Fichiers dans {cat} > {sub} :", reply_markup=get_files_menu(cat, sub))
-    elif data.startswith("file|"):
-        _, cat, sub, idx = data.split("|", 3)
-        idx = int(idx)
-        try:
-            file = files_db[cat][sub][idx]
-            await query.message.reply_document(document=file["file_id"], filename=file["filename"])
-        except:
-            await query.message.reply_text("Erreur lors de l'envoi du fichier.")
+            context.user_data["current_category"] = data
+            await query.message.reply_text(f"📂 Vous avez choisi {data}. Voici les sous-catégories disponibles :", reply_markup=get_sub_menu())
+    elif data in sub_buttons:
+        context.user_data["current_subcategory"] = data
+        await query.message.reply_text(f"✅ Sous-catégorie sélectionnée : {data}\nVous pouvez maintenant envoyer un fichier.")
+    else:
+        await query.message.reply_text(f"✅ Vous avez sélectionné : {data}")
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    loc = update.message.location
-    await update.message.reply_text(f"Localisation :\nLatitude: {loc.latitude}\nLongitude: {loc.longitude}")
+    if update.message.location:
+        lat = update.message.location.latitude
+        lon = update.message.location.longitude
+        await update.message.reply_text(f"📍 Localisation reçue :\nLatitude: {lat}\nLongitude: {lon}")
 
-async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return await update.message.reply_text("Seul l'administrateur peut ajouter des fichiers.")
-
-    args = context.args
-    if len(args) != 2:
-        return await update.message.reply_text("/upload <catégorie> <sous-catégorie>")
-    context.user_data["upload_target"] = args
-    await update.message.reply_text("Envoie maintenant le fichier.")
-
-async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return await update.message.reply_text("Tu ne peux pas envoyer de fichiers.")
-    if "upload_target" not in context.user_data:
-        return await update.message.reply_text("Utilise /upload d'abord.")
-
-    cat, sub = context.user_data["upload_target"]
-    doc = update.message.document
-    files_db[cat][sub].append({"filename": doc.file_name, "file_id": doc.file_id})
-    save_files_db()
-    await update.message.reply_text(f"Fichier {doc.file_name} ajouté dans {cat} > {sub}.")
-    del context.user_data["upload_target"]
-
-async def listfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return
-    msg = ""
-    for cat, subs in files_db.items():
-        for sub, files in subs.items():
-            if files:
-                msg += f"\n{cat} > {sub} :\n"
-                for f in files:
-                    msg += f"- {f['filename']}\n"
-    await update.message.reply_text(msg or "Aucun fichier disponible.")
-
-async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return
-    if len(context.args) < 3:
-        return await update.message.reply_text("Usage: /delete <catégorie> <sous-catégorie> <nom_fichier>")
-
-    cat, sub, filename = context.args[0], context.args[1], " ".join(context.args[2:])
-    if cat in files_db and sub in files_db[cat]:
-        files = files_db[cat][sub]
-        files_db[cat][sub] = [f for f in files if f["filename"] != filename]
-        save_files_db()
-        await update.message.reply_text(f"Fichier {filename} supprimé (si existait).")
-
-async def edit_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        return await update.message.reply_text("Seul l'administrateur peut modifier des fichiers.")
-
-    if len(context.args) < 3:
-        return await update.message.reply_text("Usage: /edit <catégorie> <sous-catégorie> <nom_fichier>")
-
-    context.user_data["edit_target"] = context.args[0], context.args[1], " ".join(context.args[2:])
-    await update.message.reply_text("Envoie maintenant le nouveau fichier pour remplacer.")
-
-async def handle_edit_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "edit_target" not in context.user_data:
+async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if str(user_id) != str(ADMIN_ID):
+        await update.message.reply_text("⛔ Tu ne peux pas envoyer de fichiers.")
         return
 
-    cat, sub, old_name = context.user_data["edit_target"]
-    doc = update.message.document
-    if not doc:
-        return await update.message.reply_text("Pas de document détecté.")
+    if not context.user_data.get("current_category") or not context.user_data.get("current_subcategory"):
+        await update.message.reply_text("❗ Choisis d'abord une catégorie et une sous-catégorie.")
+        return
 
-    # Supprimer ancien fichier
-    files = files_db.get(cat, {}).get(sub, [])
-    files_db[cat][sub] = [f for f in files if f["filename"] != old_name]
+    file = None
+    file_name = "unknown"
+    file_type = None
 
-    # Ajouter nouveau fichier
-    files_db[cat][sub].append({"filename": doc.file_name, "file_id": doc.file_id})
-    save_files_db()
-    await update.message.reply_text(f"Fichier {old_name} remplacé par {doc.file_name}.")
-    del context.user_data["edit_target"]
+    if update.message.document:
+        file = update.message.document
+        file_name = file.file_name
+        file_type = "document"
+    elif update.message.audio:
+        file = update.message.audio
+        file_name = file.file_name or "audio.mp3"
+        file_type = "audio"
+    elif update.message.video:
+        file = update.message.video
+        file_name = file.file_name or "video.mp4"
+        file_type = "video"
+    elif update.message.photo:
+        file = update.message.photo[-1]
+        file_name = f"photo_{file.file_id}.jpg"
+        file_type = "photo"
 
-def main():
+    if not file:
+        await update.message.reply_text("⚠️ Fichier non pris en charge.")
+        return
+
+    file_id = file.file_id
+    cat = context.user_data["current_category"]
+    sub = context.user_data["current_subcategory"]
+
+    if cat not in files_db:
+        files_db[cat] = {}
+    if sub not in files_db[cat]:
+        files_db[cat][sub] = []
+
+    files_db[cat][sub].append({"file_id": file_id, "file_name": file_name, "file_type": file_type})
+    save_files()
+
+    await update.message.reply_text(f"✅ Fichier « {file_name} » enregistré dans {cat}/{sub}.")
+
+if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    app.add_handler(CommandHandler("upload", upload_command))
-    app.add_handler(CommandHandler("listfiles", listfiles))
-    app.add_handler(CommandHandler("delete", delete_file))
-    app.add_handler(CommandHandler("edit", edit_file))
-    app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, document_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL & filters.COMMAND, handle_edit_document))
-    print("Bot en cours...")
-    app.run_polling()
+    app.add_handler(MessageHandler(
+        filters.Document.ALL |
+        filters.Audio.ALL |
+        filters.Video.ALL |
+        filters.Photo,
+        upload_file_handler
+    ))
 
-if __name__ == "__main__":
-    main()
+    print("✅ Bot en cours d'exécution...")
+    app.run_polling()
