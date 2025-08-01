@@ -173,15 +173,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Réponse immédiate pour tester
         await update.message.reply_text("Test : Bot démarré !")
         logger.debug("Réponse 'Test : Bot démarré !' envoyée")
-        # Ajouter le menu
+        
+        # Enregistrer l'action
+        logger.debug("Tentative d'enregistrement de l'action /start")
         log_action(user_id, "start", "Commande /start exécutée")
+        logger.debug("Action /start enregistrée avec succès")
+        
+        # Créer et envoyer le menu
+        logger.debug("Création du menu principal")
+        menu = get_main_menu()
+        logger.debug(f"Menu principal créé : {menu}")
         await update.message.reply_text(
             "Bienvenue sur @konntek_bot ! 📁\nChoisissez une catégorie :",
-            reply_markup=get_main_menu()
+            reply_markup=menu
         )
         logger.debug("Menu principal envoyé")
     except Exception as e:
-        logger.error(f"Erreur dans start : {e}")
+        logger.error(f"Erreur dans start : {e}", exc_info=True)
         await update.message.reply_text("Erreur lors du démarrage. Veuillez réessayer.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
