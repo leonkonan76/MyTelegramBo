@@ -68,11 +68,15 @@ def load_storage():
 def save_storage(data):
     with STORAGE_LOCK:
         try:
+            # Vérifier que les données sont sérialisables
+            json.dumps(data)  # Test de sérialisation
             with open(STORAGE_PATH, 'w') as f:
                 json.dump(data, f, indent=4)
             logger.debug(f"Storage sauvegardé : {data}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Erreur de sérialisation JSON dans save_storage : {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Erreur lors de l'écriture dans {STORAGE_PATH} : {e}")
+            logger.error(f"Erreur lors de l'écriture dans {STORAGE_PATH} : {e}", exc_info=True)
 
 # Vérifier les permissions du fichier de stockage
 def check_storage_permissions():
@@ -90,8 +94,8 @@ check_storage_permissions()
 
 # Fonctions utilitaires
 def log_action(user_id, action, details):
-    with STORAGE_LOCK:
-        try:
+    try:
+        with STORAGE_LOCK:
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
                 "user_id": user_id,
@@ -99,10 +103,11 @@ def log_action(user_id, action, details):
                 "details": details
             }
             STORAGE["logs"].append(log_entry)
+            logger.debug(f"Log préparé : {log_entry}")
             save_storage(STORAGE)
-            logger.info(f"Log: {log_entry}")
-        except Exception as e:
-            logger.error(f"Erreur dans log_action : {e}")
+            logger.info(f"Log enregistré : {log_entry}")
+    except Exception as e:
+        logger.error(f"Erreur dans log_action : {e}", exc_info=True)
 
 def is_admin(user_id):
     return user_id == ADMIN_ID
@@ -114,7 +119,7 @@ def get_main_menu():
         ]
         return InlineKeyboardMarkup(keyboard)
     except Exception as e:
-        logger.error(f"Erreur dans get_main_menu : {e}")
+        logger.error(f"Erreur dans get_main_menu : {e}", exc_info=True)
         return InlineKeyboardMarkup([])
 
 def get_subcategory_menu(category):
@@ -128,7 +133,7 @@ def get_subcategory_menu(category):
             keyboard.insert(0, [InlineKeyboardButton("Uploader fichier", callback_data=f"upload_{category}")])
         return InlineKeyboardMarkup(keyboard)
     except Exception as e:
-        logger.error(f"Erreur dans get_subcategory_menu : {e}")
+        logger.error(f"Erreur dans get_subcategory_menu : {e}", exc_info=True)
         return InlineKeyboardMarkup([])
 
 def get_files_menu(category, subcategory):
@@ -146,7 +151,7 @@ def get_files_menu(category, subcategory):
             keyboard.insert(0, [InlineKeyboardButton("Supprimer fichier", callback_data=f"delete_{category}_{subcategory}")])
         return InlineKeyboardMarkup(keyboard)
     except Exception as e:
-        logger.error(f"Erreur dans get_files_menu : {e}")
+        logger.error(f"Erreur dans get_files_menu : {e}", exc_info=True)
         return InlineKeyboardMarkup([])
 
 def get_upload_subcategory_menu(category):
@@ -159,7 +164,7 @@ def get_upload_subcategory_menu(category):
         keyboard.append([InlineKeyboardButton("Retour", callback_data=f"back_{category}")])
         return InlineKeyboardMarkup(keyboard)
     except Exception as e:
-        logger.error(f"Erreur dans get_upload_subcategory_menu : {e}")
+        logger.error(f"Erreur dans get_upload_subcategory_menu : {e}", exc_info=True)
         return InlineKeyboardMarkup([])
 
 # Handlers
@@ -279,7 +284,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     except Exception as e:
-        logger.error(f"Erreur dans button_callback : {e}")
+        logger.error(f"Erreur dans button_callback : {e}", exc_info=True)
         await query.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,7 +342,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Type de fichier non supporté.")
     except Exception as e:
-        logger.error(f"Erreur dans handle_file : {e}")
+        logger.error(f"Erreur dans handle_file : {e}", exc_info=True)
         await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
 
 async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -367,7 +372,7 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Fichier non trouvé.")
         context.user_data.clear()
     except Exception as e:
-        logger.error(f"Erreur dans handle_delete : {e}")
+        logger.error(f"Erreur dans handle_delete : {e}", exc_info=True)
         await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,11 +385,11 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Position reçue !\nLatitude : {location.latitude}\nLongitude : {location.longitude}"
             )
         except Exception as e:
-            logger.error(f"Erreur dans handle_location : {e}")
+            logger.error(f"Erreur dans handle_location : {e}", exc_info=True)
             await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Erreur globale : {context.error}")
+    logger.error(f"Erreur globale : {context.error}", exc_info=True)
     if update:
         await update.message.reply_text("Une erreur s'est produite. Veuillez réessayer.")
 
@@ -419,7 +424,7 @@ async def main():
             await app.updater.start_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
             await asyncio.Event().wait()  # Attendre indéfiniment
         except Exception as e:
-            logger.error(f"Erreur lors de l'initialisation du polling : {e}")
+            logger.error(f"Erreur lors de l'initialisation du polling : {e}", exc_info=True)
             raise
         finally:
             try:
@@ -428,9 +433,9 @@ async def main():
                 await app.shutdown()
                 logger.debug("Application Telegram arrêtée proprement")
             except Exception as e:
-                logger.error(f"Erreur lors de l'arrêt de l'application : {e}")
+                logger.error(f"Erreur lors de l'arrêt de l'application : {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Erreur dans main : {e}")
+        logger.error(f"Erreur dans main : {e}", exc_info=True)
         raise
 
 def run_bot():
@@ -439,14 +444,15 @@ def run_bot():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(main())
     except Exception as e:
-        logger.error(f"Erreur dans run_bot : {e}")
+        logger.error(f"Erreur dans run_bot : {e}", exc_info=True)
     finally:
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
             logger.debug("Event loop fermé proprement")
         except Exception as e:
-            logger.error(f"Erreur lors de la fermeture de l'event loop : {e}")
+            logger.error(f"Erreur lors de la fermeture de l'event loop : {e}", exc_info=True)
 
 if __name__ == "__main__":
+    logger.debug("Démarrage du bot")
     run_bot()
