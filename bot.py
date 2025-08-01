@@ -17,7 +17,8 @@ from datetime import datetime
 # Configuration
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-PERSIST_FILE = "file_storage.json"
+PERSIST_DIR = "/opt/render/.render"  # Chemin du disque Render
+PERSIST_FILE = os.path.join(PERSIST_DIR, "file_storage.json")
 
 # Initialisation du logging
 logging.basicConfig(
@@ -40,10 +41,9 @@ def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
     row = []
     
     for i, btn in enumerate(buttons):
-        # Gérer les boutons spéciaux (texte et callback_data différents)
         if isinstance(btn, tuple):
-            text, callback_data = btn
-            row.append(InlineKeyboardButton(text, callback_data=callback_data))
+            text, callback = btn
+            row.append(InlineKeyboardButton(text, callback_data=callback))
         else:
             row.append(InlineKeyboardButton(btn, callback_data=btn))
         
@@ -62,15 +62,25 @@ def create_menu(buttons, back_button=False, back_data="main_menu", columns=1):
 # Charger l'état initial
 def load_initial_storage():
     try:
-        with open(PERSIST_FILE, 'r') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+        # Créer le dossier s'il n'existe pas
+        os.makedirs(PERSIST_DIR, exist_ok=True)
+        
+        if os.path.exists(PERSIST_FILE):
+            with open(PERSIST_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        logger.error(f"Erreur de chargement du stockage: {e}")
         return {}
 
 # Sauvegarder le stockage
-def save_storage(file_storage):
-    with open(PERSIST_FILE, 'w') as f:
-        json.dump(file_storage, f)
+def save_storage(data):
+    try:
+        os.makedirs(PERSIST_DIR, exist_ok=True)
+        with open(PERSIST_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Erreur de sauvegarde: {e}")
 
 # Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,7 +259,10 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Erreur: Catégorie non définie. Veuillez recommencer.")
         return ConversationHandler.END
     
+    # Récupérer ou initialiser le stockage
     file_storage = context.bot_data.get("file_storage", {})
+    if not file_storage:
+        file_storage = {}
     
     if category not in file_storage:
         file_storage[category] = {}
@@ -265,7 +278,7 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file_name = file.file_name or "document"
         file_type = "document"
     elif update.message.photo:
-        file = update.message.photo[-1]
+        file = update.message.photo[-1]  # Dernier élément = meilleure qualité
         file_name = "photo.jpg"
         file_type = "photo"
     elif update.message.audio:
@@ -280,9 +293,11 @@ async def handle_uploaded_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file = update.message.voice
         file_name = "audio.ogg"
         file_type = "voice"
-    elif update.message.text:
+    elif update.message.text and update.message.text != "/cancel":
         await update.message.reply_text("❌ Veuillez envoyer un fichier valide")
         return UPLOADING_FILE
+    else:
+        return ConversationHandler.END
     
     if file:
         file_info = {
@@ -399,9 +414,7 @@ if __name__ == '__main__':
     file_storage = load_initial_storage()
     
     # Créer l'application
-    app = ApplicationBuilder() \
-        .token(TOKEN) \
-        .build()
+    app = ApplicationBuilder().token(TOKEN).build()
     
     # Stocker les données initiales
     app.bot_data["file_storage"] = file_storage
@@ -431,4 +444,5 @@ if __name__ == '__main__':
     app.add_handler(upload_conv_handler)
 
     logger.info("🤖 Bot en cours d'exécution...")
+    logger.info(f"Chemin de persistance: {PERSIST_FILE}")
     app.run_polling()
