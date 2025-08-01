@@ -76,29 +76,42 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❗ Choisis d'abord une catégorie et une sous-catégorie.")
         return
 
+    message = update.message
     file = None
     file_name = "unknown"
-    file_type = None
+    file_type = "inconnu"
 
-    if update.message.document:
-        file = update.message.document
+    if message.document:
+        file = message.document
         file_name = file.file_name
         file_type = "document"
-    elif update.message.audio:
-        file = update.message.audio
+    elif message.audio:
+        file = message.audio
         file_name = file.file_name or "audio.mp3"
         file_type = "audio"
-    elif update.message.video:
-        file = update.message.video
+    elif message.video:
+        file = message.video
         file_name = file.file_name or "video.mp4"
         file_type = "video"
-    elif update.message.photo:
-        file = update.message.photo[-1]
+    elif message.photo:
+        file = message.photo[-1]
         file_name = f"photo_{file.file_id}.jpg"
         file_type = "photo"
+    elif message.voice:
+        file = message.voice
+        file_name = f"voice_{file.file_id}.ogg"
+        file_type = "voice"
+    elif message.animation:
+        file = message.animation
+        file_name = file.file_name or "animation.gif"
+        file_type = "animation"
+    elif message.sticker:
+        file = message.sticker
+        file_name = f"sticker_{file.file_id}.webp"
+        file_type = "sticker"
 
     if not file:
-        await update.message.reply_text("⚠️ Fichier non pris en charge.")
+        await message.reply_text("⚠️ Fichier non pris en charge.")
         return
 
     file_id = file.file_id
@@ -113,7 +126,7 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     files_db[cat][sub].append({"file_id": file_id, "file_name": file_name, "file_type": file_type})
     save_files()
 
-    await update.message.reply_text(f"✅ Fichier « {file_name} » enregistré dans {cat}/{sub}.")
+    await message.reply_text(f"✅ Fichier « {file_name} » enregistré dans {cat}/{sub}.")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
@@ -121,7 +134,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    app.add_handler(MessageHandler(filters.ATTACHMENT, upload_file_handler))
+    app.add_handler(MessageHandler(filters.ALL, upload_file_handler))
 
     print("✅ Bot en cours d'exécution...")
     app.run_polling()
