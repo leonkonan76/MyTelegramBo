@@ -1,1 +1,2 @@
-TOKEN = "TON_TOKEN_TELEGRAM_ICI"  # Remplace par ton vrai token
+import os
+TOKEN = os.getenv("BOT_TOKEN")
