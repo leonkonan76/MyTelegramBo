@@ -3,6 +3,7 @@ import json
 import logging
 import shutil
 import threading
+import asyncio
 from uuid import uuid4
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -381,34 +382,58 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     try:
+        # Créer une nouvelle instance de l'application
         app = Application.builder().token(TOKEN).build()
-    except telegram.error.InvalidToken as e:
-        logger.error(f"Invalid token: {e}")
-        raise
+        logger.debug("Application Telegram initialisée")
 
-    # Handlers
-    app.add_handler(MessageHandler(filters.ALL, debug_update), group=1)
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VIDEO | filters.VOICE, handle_file))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delete))
-    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-    app.add_error_handler(error_handler)
+        # Handlers
+        app.add_handler(MessageHandler(filters.ALL, debug_update), group=1)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(button_callback))
+        app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VIDEO | filters.VOICE, handle_file))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delete))
+        app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+        app.add_handler(CommandHandler("upload", start))  # Ajout d'un handler pour /upload
+        app.add_error_handler(error_handler)
 
-    logger.info("Starting polling")
-    # Récupérer les dernières mises à jour pour réinitialiser l'offset
-    try:
-        updates = await app.bot.get_updates(timeout=10)
-        logger.debug(f"Mises à jour initiales reçues : {len(updates)}")
-        if updates:
-            last_update_id = updates[-1].update_id
-            logger.debug(f"Dernier update_id : {last_update_id}")
-            await app.bot.get_updates(offset=last_update_id + 1, timeout=10)
-        await app.run_polling(allowed_updates=["message", "callback_query"])
+        logger.info("Starting polling")
+        # Récupérer les dernières mises à jour pour réinitialiser l'offset
+        try:
+            updates = await app.bot.get_updates(timeout=10)
+            logger.debug(f"Mises à jour initiales reçues : {len(updates)}")
+            if updates:
+                last_update_id = updates[-1].update_id
+                logger.debug(f"Dernier update_id : {last_update_id}")
+                await app.bot.get_updates(offset=last_update_id + 1, timeout=10)
+            # Lancer le polling
+            await app.run_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation du polling : {e}")
+            raise
     except Exception as e:
-        logger.error(f"Erreur lors de l'initialisation du polling : {e}")
+        logger.error(f"Erreur dans main : {e}")
         raise
+    finally:
+        # Assurer l'arrêt propre de l'application
+        try:
+            if 'app' in locals():
+                await app.stop()
+                await app.shutdown()
+                logger.debug("Application Telegram arrêtée proprement")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'arrêt de l'application : {e}")
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        logger.error(f"Erreur dans asyncio.run : {e}")
+        # Si l'event loop est déjà en cours, utiliser l'event loop existant
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            logger.debug("Utilisation de l'event loop existant")
+            loop.create_task(main())
+        else:
+            loop.run_until_complete(main())
+    except Exception as e:
+        logger.error(f"Erreur critique : {e}")
