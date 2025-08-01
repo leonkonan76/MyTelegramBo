@@ -1,4 +1,4 @@
-# bot.py
+# bot.py (version complète corrigée)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -266,13 +266,19 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Handler de conversation pour l'upload
+    # CORRECTION : Utilisation des nouveaux filtres
     upload_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_file_upload, pattern="^upload_file$")],
         states={
             UPLOADING_FILE: [
-                MessageHandler(filters.DOCUMENT | filters.PHOTO | filters.AUDIO | 
-                              filters.VIDEO | filters.VOICE, handle_uploaded_file),
+                MessageHandler(
+                    filters.Document.ALL | 
+                    filters.PHOTO | 
+                    filters.Audio.ALL | 
+                    filters.Video.ALL | 
+                    filters.VOICE, 
+                    handle_uploaded_file
+                ),
                 CommandHandler("cancel", cancel_upload)
             ]
         },
