@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import shutil
+import threading
 from uuid import uuid4
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,63 +33,64 @@ if not TOKEN:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable.")
 
 # Structure des catégories
-CATEGORIES = {
-    "KF": ["SMS", "Contacts", "Historiques appels"],
-    "BELO": ["iMessenger", "Facebook Messenger"],
-    "SOULAN": ["Audio", "Vidéo"],
-    "KfClone": ["Documents", "Autres"],
-    "Filtres": [],
-    "Géolocalisation": [],
-}
+MAIN_CATEGORIES = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
+SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
+CATEGORIES = {cat: SUB_CATEGORIES for cat in MAIN_CATEGORIES}
 
-# Initialisation du stockage
+# Initialisation du stockage avec verrou pour accès concurrent
+STORAGE_LOCK = threading.Lock()
+STORAGE = None
+
 def load_storage():
-    # Créer le répertoire parent si absent
-    parent_dir = os.path.dirname(STORAGE_PATH)
-    if not os.path.exists(parent_dir):
-        os.makedirs(parent_dir)
-        logger.info(f"Répertoire créé : {parent_dir}")
-    
-    # Vérifier si STORAGE_PATH est un répertoire
-    if os.path.isdir(STORAGE_PATH):
-        shutil.rmtree(STORAGE_PATH)
-        logger.warning(f"Répertoire {STORAGE_PATH} supprimé pour permettre la création du fichier.")
-    
-    try:
-        with open(STORAGE_PATH, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"files": {}, "logs": []}
+    with STORAGE_LOCK:
+        # Créer le répertoire parent si absent
+        parent_dir = os.path.dirname(STORAGE_PATH)
+        if not os.path.exists(parent_dir):
+            os.makedirs(parent_dir)
+            logger.info(f"Répertoire créé : {parent_dir}")
+        
+        # Vérifier si STORAGE_PATH est un répertoire
+        if os.path.isdir(STORAGE_PATH):
+            shutil.rmtree(STORAGE_PATH)
+            logger.warning(f"Répertoire {STORAGE_PATH} supprimé pour permettre la création du fichier.")
+        
+        try:
+            with open(STORAGE_PATH, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {"files": {}, "logs": []}
 
 def save_storage(data):
-    with open(STORAGE_PATH, 'w') as f:
-        json.dump(data, f, indent=4)
+    with STORAGE_LOCK:
+        with open(STORAGE_PATH, 'w') as f:
+            json.dump(data, f, indent=4)
 
 STORAGE = load_storage()
 
 # Fonctions utilitaires
 def log_action(user_id, action, details):
-    log_entry = {
-        "timestamp": datetime.now().isoformat(),
-        "user_id": user_id,
-        "action": action,
-        "details": details
-    }
-    STORAGE["logs"].append(log_entry)
-    save_storage(STORAGE)
-    logger.info(f"Log: {log_entry}")
+    with STORAGE_LOCK:
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user_id": user_id,
+            "action": action,
+            "details": details
+        }
+        STORAGE["logs"].append(log_entry)
+        save_storage(STORAGE)
+        logger.info(f"Log: {log_entry}")
 
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
 def get_main_menu():
     keyboard = [
-        [InlineKeyboardButton(cat, callback_data=f"cat_{cat}") for cat in CATEGORIES.keys()]
+        [InlineKeyboardButton(cat, callback_data=f"cat_{cat}") for cat in MAIN_CATEGORIES]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_subcategory_menu(category):
-    subcategories = CATEGORIES.get(category, [])
+    subcategories = CATEGORIES.get(category, SUB_CATEGORIES)
     keyboard = [
         [InlineKeyboardButton(subcat, callback_data=f"subcat_{category}_{subcat}") for subcat in subcategories]
     ]
@@ -109,6 +111,15 @@ def get_files_menu(category, subcategory):
     keyboard.append([InlineKeyboardButton("Retour", callback_data=f"back_{category}")])
     if is_admin:  # Bouton suppression pour admin
         keyboard.insert(0, [InlineKeyboardButton("Supprimer fichier", callback_data=f"delete_{category}_{subcategory}")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_upload_subcategory_menu(category):
+    subcategories = CATEGORIES.get(category, SUB_CATEGORIES)
+    keyboard = [
+        [InlineKeyboardButton(subcat, callback_data=f"upload_subcat_{category}_{subcat}")]
+        for subcat in subcategories
+    ]
+    keyboard.append([InlineKeyboardButton("Retour", callback_data=f"back_{category}")])
     return InlineKeyboardMarkup(keyboard)
 
 # Handlers
@@ -172,14 +183,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("upload_"):
+        if not is_admin(user_id):
+            await query.message.reply_text("Action réservée aux administrateurs.")
+            return
         category = data[7:]
         context.user_data["upload_category"] = category
+        await query.edit_message_text(
+            f"Choisissez une sous-catégorie pour l'upload dans {category} :",
+            reply_markup=get_upload_subcategory_menu(category)
+        )
+        return
+
+    if data.startswith("upload_subcat_"):
+        _, category, subcategory = data.split("_", 2)
+        if not is_admin(user_id):
+            await query.message.reply_text("Action réservée aux administrateurs.")
+            return
+        context.user_data["upload_category"] = category
+        context.user_data["upload_subcategory"] = subcategory
         await query.message.reply_text(
-            f"Envoyez le fichier à uploader dans {category} (admin uniquement)."
+            f"Envoyez le fichier à uploader dans {category} > {subcategory} (admin uniquement)."
         )
         return
 
     if data.startswith("delete_"):
+        if not is_admin(user_id):
+            await query.message.reply_text("Action réservée aux administrateurs.")
+            return
         _, category, subcategory = data.split("_", 2)
         context.user_data["delete_mode"] = {"category": category, "subcategory": subcategory}
         await query.message.reply_text(
@@ -194,8 +224,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     category = context.user_data.get("upload_category")
-    if not category:
-        await update.message.reply_text("Veuillez sélectionner une catégorie d'abord.")
+    subcategory = context.user_data.get("upload_subcategory")
+    if not category or not subcategory:
+        await update.message.reply_text("Veuillez sélectionner une catégorie et une sous-catégorie d'abord.")
         return
 
     file = None
@@ -206,9 +237,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_type = "document"
         file_name = file.file_name or "document"
     elif update.message.photo:
-        file = update.message.photo[-1]  # Prendre la plus haute résolution
+        file = update.message.photo[-1]
         file_type = "photo"
-        file_name = "photo.jpg"  # Nom par défaut pour les photos
+        file_name = "photo.jpg"
     elif update.message.audio:
         file = update.message.audio
         file_type = "audio"
@@ -228,13 +259,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         STORAGE["files"][unique_file_name] = {
             "file_id": file_id,
             "category": category,
-            "subcategory": context.user_data.get("upload_subcategory", "Autres"),
+            "subcategory": subcategory,
             "type": file_type,
             "uploaded_at": datetime.now().isoformat(),
             "uploader_id": user_id
         }
         save_storage(STORAGE)
-        log_action(user_id, "upload_file", f"Fichier : {unique_file_name} dans {category}")
+        log_action(user_id, "upload_file", f"Fichier : {unique_file_name} dans {category} > {subcategory}")
         await update.message.reply_text(f"Fichier {unique_file_name} uploadé avec succès !")
         context.user_data.clear()
     else:
