@@ -3,7 +3,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 import os, json
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID") or "123456789"  # Remplace par ton ID admin réel
+ADMIN_ID = os.getenv("ADMIN_ID") or "123456789"  # Mets ici ton ID admin Telegram (numérique)
 
 main_buttons = ["KF", "BELO", "SOULAN", "KfClone", "Filtres", "Géolocalisation"]
 sub_buttons = ["SMS", "CONTACTS", "Historiques appels", "iMessenger", "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
@@ -84,7 +84,7 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_name = "unknown"
     file_type = None
 
-    # Gérer tous types de fichiers
+    # Détection du fichier envoyé
     if update.message.document:
         file = update.message.document
         file_name = file.file_name
@@ -111,16 +111,30 @@ async def upload_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     file_id = file.file_id
 
+    # Création dossier local
+    folder_path = os.path.join("stored_files", cat, sub)
+    os.makedirs(folder_path, exist_ok=True)
+
+    # Téléchargement du fichier depuis Telegram
+    telegram_file = await context.bot.get_file(file_id)
+    local_path = os.path.join(folder_path, file_name)
+    await telegram_file.download_to_drive(local_path)
+
+    # Enregistrement dans la base JSON
     if cat not in files_db:
         files_db[cat] = {}
     if sub not in files_db[cat]:
         files_db[cat][sub] = []
 
-    # Eviter doublons si nécessaire, sinon juste ajouter
-    files_db[cat][sub].append({"file_id": file_id, "file_name": file_name, "file_type": file_type})
+    files_db[cat][sub].append({
+        "file_id": file_id,
+        "file_name": file_name,
+        "file_type": file_type,
+        "local_path": local_path
+    })
     save_files()
 
-    await update.message.reply_text(f"✅ Fichier « {file_name} » enregistré dans {cat}/{sub}.")
+    await update.message.reply_text(f"✅ Fichier « {file_name} » enregistré dans {cat}/{sub} et téléchargé sur le serveur.")
 
 async def listfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
