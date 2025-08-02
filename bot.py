@@ -31,7 +31,7 @@ RENDER_STORAGE.mkdir(exist_ok=True, parents=True)
 
 # Chemins des fichiers
 STORAGE_PATH = RENDER_STORAGE / "file_storage.json"
-HIDDEN_PATH = RENDER_STORAGE / "hidden_files.json"  # Nouveau fichier pour les masquages
+HIDDEN_PATH = RENDER_STORAGE / "hidden_files.json"
 LOG_FILE = RENDER_STORAGE / "bot_activity.log"
 
 # Catégories
@@ -41,6 +41,7 @@ SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger",
 
 # États de conversation
 SELECTING_CATEGORY, SELECTING_SUBCATEGORY, UPLOADING_FILE, CONFIRMING_DELETE = range(4)
+VIEWING_HIDDEN = 4  # Nouvel état
 
 # Configuration du logging
 logging.basicConfig(
@@ -67,7 +68,6 @@ class FileStorage:
         except Exception as e:
             logger.error(f"Storage load error: {str(e)}")
         
-        # Structure initiale
         return {cat: {sub: [] for sub in SUB_CATEGORIES} for cat in MAIN_CATEGORIES}
     
     def save_data(self):
@@ -100,7 +100,7 @@ class FileStorage:
             logger.error(f"Remove file error: {str(e)}")
         return False
 
-# Nouveau système de masquage des fichiers
+# Système de masquage des fichiers
 class HiddenFiles:
     def __init__(self, file_path):
         self.file_path = file_path
@@ -139,6 +139,30 @@ class HiddenFiles:
             return True
         return False
     
+    def unhide_file(self, user_id, category, subcategory, file_index):
+        user_id = str(user_id)
+        try:
+            if (user_id in self.data and
+                category in self.data[user_id] and
+                subcategory in self.data[user_id][category] and
+                file_index in self.data[user_id][category][subcategory]):
+                
+                self.data[user_id][category][subcategory].remove(file_index)
+                
+                # Nettoyer les structures vides
+                if not self.data[user_id][category][subcategory]:
+                    del self.data[user_id][category][subcategory]
+                    if not self.data[user_id][category]:
+                        del self.data[user_id][category]
+                        if not self.data[user_id]:
+                            del self.data[user_id]
+                
+                self.save_data()
+                return True
+        except Exception as e:
+            logger.error(f"Unhide file error: {str(e)}")
+        return False
+    
     def is_hidden(self, user_id, category, subcategory, file_index):
         user_id = str(user_id)
         return (
@@ -147,6 +171,22 @@ class HiddenFiles:
             subcategory in self.data[user_id][category] and
             file_index in self.data[user_id][category][subcategory]
         )
+    
+    def get_hidden_files(self, user_id):
+        user_id = str(user_id)
+        if user_id not in self.data:
+            return []
+        
+        hidden_list = []
+        for category, subcategories in self.data[user_id].items():
+            for subcategory, indexes in subcategories.items():
+                for index in indexes:
+                    hidden_list.append({
+                        "category": category,
+                        "subcategory": subcategory,
+                        "index": index
+                    })
+        return hidden_list
 
 # Initialisation des stockages
 storage = FileStorage(STORAGE_PATH)
@@ -158,10 +198,15 @@ def log_activity(user_id: int, action: str, details: str):
     logger.info(log_entry)
     print(log_entry)
 
-def create_main_menu():
+def create_main_menu(user_id=None):
     keyboard = []
     for cat in MAIN_CATEGORIES:
         keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+    
+    # Ajouter le bouton pour les fichiers masqués
+    if user_id and hidden_files.get_hidden_files(user_id):
+        keyboard.append([InlineKeyboardButton("👁️‍🗨️ Fichiers masqués", callback_data="view_hidden")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def create_subcategory_menu(category):
@@ -202,6 +247,28 @@ def create_file_menu(category, subcategory, user_id):
     keyboard.append(footer)
     return InlineKeyboardMarkup(keyboard)
 
+def create_hidden_files_menu(user_id):
+    hidden_list = hidden_files.get_hidden_files(user_id)
+    keyboard = []
+    
+    for item in hidden_list:
+        cat = item["category"]
+        sub = item["subcategory"]
+        idx = item["index"]
+        
+        try:
+            file_data = storage.data[cat][sub][idx]
+            file_name = file_data.get('file_name', f'Fichier {idx+1}')
+            btn_text = f"{cat}/{sub} - {file_name}"
+            keyboard.append([
+                InlineKeyboardButton(btn_text, callback_data=f"unhide_{cat}_{sub}_{idx}")
+            ])
+        except:
+            continue
+    
+    keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(keyboard)
+
 # Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -210,7 +277,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📂 Accédez à la médiathèque organisée par catégories.\n"
         "📍 Envoyez /location pour partager votre position."
     )
-    await update.message.reply_text(welcome_msg, reply_markup=create_main_menu())
+    await update.message.reply_text(
+        welcome_msg, 
+        reply_markup=create_main_menu(user.id)
+    )
     log_activity(user.id, "START", f"User: {user.first_name}")
 
 async def location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -272,6 +342,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(idx)
         try:
             file_data = storage.data[category][subcategory][idx]
+            
+            # CORRECTION : Envoi du fichier pour tous les utilisateurs
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=file_data["file_id"],
@@ -346,6 +418,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.answer("❌ Erreur lors du masquage", show_alert=True)
     
+    elif data.startswith("unhide_"):  # Rendre visible
+        _, category, subcategory, idx = data.split("_", 3)
+        idx = int(idx)
+        
+        if hidden_files.unhide_file(user_id, category, subcategory, idx):
+            await query.answer("✅ Fichier à nouveau visible", show_alert=True)
+            
+            # Mettre à jour le menu
+            files = storage.data.get(category, {}).get(subcategory, [])
+            visible_files = [
+                f for i, f in enumerate(files) 
+                if not hidden_files.is_hidden(user_id, category, subcategory, i)
+            ]
+            
+            msg = f"📂 {category} / {subcategory}\n\n"
+            msg += "Aucun fichier disponible." if not visible_files else f"{len(visible_files)} fichier(s) disponible(s) :"
+            
+            await query.edit_message_text(
+                msg,
+                reply_markup=create_file_menu(category, subcategory, user_id)
+            )
+        else:
+            await query.answer("❌ Erreur lors de l'affichage", show_alert=True)
+    
+    elif data == "view_hidden":  # Voir les fichiers masqués
+        hidden_list = hidden_files.get_hidden_files(user_id)
+        if not hidden_list:
+            await query.answer("Vous n'avez aucun fichier masqué", show_alert=True)
+            return
+        
+        await query.edit_message_text(
+            "📁 Vos fichiers masqués :\n\nCliquez sur un fichier pour le rendre à nouveau visible",
+            reply_markup=create_hidden_files_menu(user_id)
+        )
+        return VIEWING_HIDDEN
+    
     elif data == "confirm_delete":
         try:
             category = context.user_data['del_category']
@@ -368,7 +476,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     elif data == "back_to_main":
-        await query.edit_message_text("📂 Menu Principal :", reply_markup=create_main_menu())
+        await query.edit_message_text(
+            "📂 Menu Principal :", 
+            reply_markup=create_main_menu(user_id)
+        )
+        return ConversationHandler.END
     
     elif data.startswith("back_to_sub_"):
         category = data.split("_")[-1]
@@ -387,7 +499,7 @@ async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['current_file'] = update.message
     await update.message.reply_text(
         "Sélectionnez une catégorie :",
-        reply_markup=create_main_menu()
+        reply_markup=create_main_menu(user.id)
     )
     return SELECTING_CATEGORY
 
@@ -508,7 +620,8 @@ def main():
         ],
         states={
             SELECTING_CATEGORY: [CallbackQueryHandler(select_category)],
-            SELECTING_SUBCATEGORY: [CallbackQueryHandler(select_subcategory)]
+            SELECTING_SUBCATEGORY: [CallbackQueryHandler(select_subcategory)],
+            VIEWING_HIDDEN: [CallbackQueryHandler(handle_callback)]  # Nouvel état
         },
         fallbacks=[CommandHandler('cancel', cancel)],
         map_to_parent={ConversationHandler.END: ConversationHandler.END}
