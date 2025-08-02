@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import requests
 from datetime import datetime
 from pathlib import Path
 from telegram import (
@@ -10,8 +9,7 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    InputFile
+    ReplyKeyboardRemove
 )
 from telegram.ext import (
     Application,
@@ -19,6 +17,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
+    ConversationHandler,
     filters
 )
 
@@ -32,14 +31,16 @@ RENDER_STORAGE.mkdir(exist_ok=True, parents=True)
 
 # Chemins des fichiers
 STORAGE_PATH = RENDER_STORAGE / "file_storage.json"
-FILES_DIR = RENDER_STORAGE / "files"
-FILES_DIR.mkdir(exist_ok=True, parents=True)
+HIDDEN_PATH = RENDER_STORAGE / "hidden_files.json"
 LOG_FILE = RENDER_STORAGE / "bot_activity.log"
 
 # Catégories
 MAIN_CATEGORIES = ["KF", "BELO", "SOULAN", "KFClone", "Filtres", "Géolocalisation"]
 SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger", 
                  "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
+
+# États de conversation
+SELECTING_CATEGORY, SELECTING_SUBCATEGORY, CONFIRMING_DELETE, VIEWING_HIDDEN = range(4)
 
 # Configuration du logging
 logging.basicConfig(
@@ -89,22 +90,106 @@ class FileStorage:
         try:
             if category in self.data and subcategory in self.data[category]:
                 if 0 <= file_index < len(self.data[category][subcategory]):
-                    file_data = self.data[category][subcategory][file_index]
-                    file_path = FILES_DIR / file_data["file_path"]
-                    
-                    # Supprimer le fichier physique
-                    if file_path.exists():
-                        file_path.unlink()
-                    
+                    file_name = self.data[category][subcategory][file_index]["file_name"]
                     del self.data[category][subcategory][file_index]
                     self.save_data()
-                    logger.info(f"File removed: {category}/{subcategory}/{file_path.name}")
+                    logger.info(f"File removed: {category}/{subcategory}/{file_name}")
                     return True
         except Exception as e:
             logger.error(f"Remove file error: {str(e)}")
         return False
 
+# Système de masquage des fichiers
+class HiddenFiles:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.data = self.load_data()
+    
+    def load_data(self):
+        try:
+            if self.file_path.exists():
+                with open(self.file_path, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Hidden files load error: {str(e)}")
+        return {}
+    
+    def save_data(self):
+        try:
+            with open(self.file_path, 'w') as f:
+                json.dump(self.data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Hidden files save error: {str(e)}")
+    
+    def hide_file(self, user_id, category, subcategory, file_index):
+        user_id = str(user_id)
+        if user_id not in self.data:
+            self.data[user_id] = {}
+        
+        if category not in self.data[user_id]:
+            self.data[user_id][category] = {}
+        
+        if subcategory not in self.data[user_id][category]:
+            self.data[user_id][category][subcategory] = []
+        
+        if file_index not in self.data[user_id][category][subcategory]:
+            self.data[user_id][category][subcategory].append(file_index)
+            self.save_data()
+            return True
+        return False
+    
+    def unhide_file(self, user_id, category, subcategory, file_index):
+        user_id = str(user_id)
+        try:
+            if (user_id in self.data and
+                category in self.data[user_id] and
+                subcategory in self.data[user_id][category] and
+                file_index in self.data[user_id][category][subcategory]):
+                
+                self.data[user_id][category][subcategory].remove(file_index)
+                
+                # Nettoyer les structures vides
+                if not self.data[user_id][category][subcategory]:
+                    del self.data[user_id][category][subcategory]
+                    if not self.data[user_id][category]:
+                        del self.data[user_id][category]
+                        if not self.data[user_id]:
+                            del self.data[user_id]
+                
+                self.save_data()
+                return True
+        except Exception as e:
+            logger.error(f"Unhide file error: {str(e)}")
+        return False
+    
+    def is_hidden(self, user_id, category, subcategory, file_index):
+        user_id = str(user_id)
+        return (
+            user_id in self.data and
+            category in self.data[user_id] and
+            subcategory in self.data[user_id][category] and
+            file_index in self.data[user_id][category][subcategory]
+        )
+    
+    def get_hidden_files(self, user_id):
+        user_id = str(user_id)
+        if user_id not in self.data:
+            return []
+        
+        hidden_list = []
+        for category, subcategories in self.data[user_id].items():
+            for subcategory, indexes in subcategories.items():
+                for index in indexes:
+                    hidden_list.append({
+                        "category": category,
+                        "subcategory": subcategory,
+                        "index": index
+                    })
+        return hidden_list
+
+# Initialisation des stockages
 storage = FileStorage(STORAGE_PATH)
+hidden_files = HiddenFiles(HIDDEN_PATH)
 
 # Helpers
 def log_activity(user_id: int, action: str, details: str):
@@ -112,10 +197,15 @@ def log_activity(user_id: int, action: str, details: str):
     logger.info(log_entry)
     print(log_entry)
 
-def create_main_menu():
+def create_main_menu(user_id=None):
     keyboard = []
     for cat in MAIN_CATEGORIES:
         keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+    
+    # Ajouter le bouton pour les fichiers masqués
+    if user_id and hidden_files.get_hidden_files(user_id):
+        keyboard.append([InlineKeyboardButton("👁️‍🗨️ Fichiers masqués", callback_data="view_hidden")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def create_subcategory_menu(category):
@@ -125,41 +215,58 @@ def create_subcategory_menu(category):
     keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="back_to_main")])
     return InlineKeyboardMarkup(keyboard)
 
-def create_file_menu(category, subcategory):
+def create_file_menu(category, subcategory, user_id):
     files = storage.data.get(category, {}).get(subcategory, [])
     keyboard = []
     
     for idx, file in enumerate(files):
+        # Vérifier si le fichier est masqué pour cet utilisateur
+        if hidden_files.is_hidden(user_id, category, subcategory, idx):
+            continue
+            
         file_name = file.get('file_name', f'Fichier {idx+1}')
-        keyboard.append([
-            InlineKeyboardButton(f"⬇️ {file_name}", callback_data=f"file_{category}_{subcategory}_{idx}"),
-        ])
+        btn_row = [
+            InlineKeyboardButton(f"⬇️ {file_name}", callback_data=f"file_{category}_{subcategory}_{idx}")
+        ]
+        
+        # Boutons d'action
+        if user_id == ADMIN_ID:
+            btn_row.append(InlineKeyboardButton("🗑️", callback_data=f"del_{category}_{subcategory}_{idx}"))
+        else:
+            btn_row.append(InlineKeyboardButton("👁️", callback_data=f"hide_{category}_{subcategory}_{idx}"))
+        
+        keyboard.append(btn_row)
     
-    keyboard.append([
-        InlineKeyboardButton("🔙 Retour", callback_data=f"back_to_sub_{category}"),
-        InlineKeyboardButton("➕ Upload", callback_data=f"upload_{category}_{subcategory}")
-    ])
+    footer = [InlineKeyboardButton("🔙 Retour", callback_data=f"back_to_sub_{category}")]
     
+    # Bouton upload uniquement pour admin
+    if user_id == ADMIN_ID:
+        footer.append(InlineKeyboardButton("➕ Upload", callback_data=f"upload_{category}_{subcategory}"))
+    
+    keyboard.append(footer)
     return InlineKeyboardMarkup(keyboard)
 
-# Télécharger et sauvegarder physiquement un fichier
-async def download_and_save_file(file_id, file_name, context):
-    try:
-        # Obtenir les informations du fichier
-        file = await context.bot.get_file(file_id)
+def create_hidden_files_menu(user_id):
+    hidden_list = hidden_files.get_hidden_files(user_id)
+    keyboard = []
+    
+    for item in hidden_list:
+        cat = item["category"]
+        sub = item["subcategory"]
+        idx = item["index"]
         
-        # Télécharger le contenu
-        file_content = await file.download_as_bytearray()
-        
-        # Sauvegarder physiquement
-        file_path = FILES_DIR / file_name
-        with open(file_path, 'wb') as f:
-            f.write(file_content)
-            
-        return str(file_path.relative_to(RENDER_STORAGE))
-    except Exception as e:
-        logger.error(f"File save error: {str(e)}")
-        return None
+        try:
+            file_data = storage.data[cat][sub][idx]
+            file_name = file_data.get('file_name', f'Fichier {idx+1}')
+            btn_text = f"{cat}/{sub} - {file_name}"
+            keyboard.append([
+                InlineKeyboardButton(btn_text, callback_data=f"unhide_{cat}_{sub}_{idx}")
+            ])
+        except:
+            continue
+    
+    keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(keyboard)
 
 # Commandes
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -169,7 +276,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📂 Accédez à la médiathèque organisée par catégories.\n"
         "📍 Envoyez /location pour partager votre position."
     )
-    await update.message.reply_text(welcome_msg, reply_markup=create_main_menu())
+    await update.message.reply_text(
+        welcome_msg, 
+        reply_markup=create_main_menu(user.id)
+    )
     log_activity(user.id, "START", f"User: {user.first_name}")
 
 async def location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,11 +322,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, category, subcategory = data.split("_", 2)
         files = storage.data.get(category, {}).get(subcategory, [])
         msg = f"📂 {category} / {subcategory}\n\n"
-        msg += "Aucun fichier disponible." if not files else "Sélectionnez un fichier :"
+        
+        # Compter les fichiers visibles
+        visible_files = [
+            f for idx, f in enumerate(files) 
+            if not hidden_files.is_hidden(user_id, category, subcategory, idx)
+        ]
+        
+        msg += "Aucun fichier disponible." if not visible_files else f"{len(visible_files)} fichier(s) disponible(s) :"
         
         await query.edit_message_text(
             msg,
-            reply_markup=create_file_menu(category, subcategory)
+            reply_markup=create_file_menu(category, subcategory, user_id)
         )
     
     elif data.startswith("file_"):
@@ -224,15 +341,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(idx)
         try:
             file_data = storage.data[category][subcategory][idx]
-            file_path = RENDER_STORAGE / file_data["file_path"]
             
-            # Envoyer le fichier physique
-            with open(file_path, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=InputFile(f),
-                    caption=f"📥 {file_data['file_name']}"
-                )
+            # Solution garantie pour l'envoi de fichiers
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_data["file_id"],
+                caption=f"📥 {file_data['file_name']}"
+            )
             log_activity(user_id, "DOWNLOAD", f"{category}/{subcategory}/{file_data['file_name']}")
         except Exception as e:
             logger.error(f"Download error: {str(e)}")
@@ -247,9 +362,123 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['upload_category'] = category
         context.user_data['upload_subcategory'] = subcategory
         await query.edit_message_text("⬆️ Envoyez le fichier à uploader (tout format accepté) :")
+        # Pas de changement d'état, on attend le fichier dans le handler principal
+    
+    elif data.startswith("del_"):  # Suppression admin (globale)
+        if user_id != ADMIN_ID:
+            await query.answer("❌ Action réservée à l'admin", show_alert=True)
+            return
+        
+        _, category, subcategory, idx = data.split("_", 3)
+        idx = int(idx)
+        try:
+            file_name = storage.data[category][subcategory][idx]["file_name"]
+            context.user_data['del_index'] = idx
+            context.user_data['del_category'] = category
+            context.user_data['del_subcategory'] = subcategory
+            
+            keyboard = [
+                [InlineKeyboardButton("✅ Confirmer", callback_data="confirm_delete")],
+                [InlineKeyboardButton("❌ Annuler", callback_data=f"sub_{category}_{subcategory}")]
+            ]
+            
+            await query.edit_message_text(
+                f"⚠️ Supprimer ce fichier pour TOUS les utilisateurs ?\n\n"
+                f"🗑️ {file_name}\n\n"
+                f"Cette action est irréversible !",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return CONFIRMING_DELETE
+        except Exception as e:
+            logger.error(f"Delete setup error: {str(e)}")
+            await query.answer("❌ Fichier introuvable", show_alert=True)
+    
+    elif data.startswith("hide_"):  # Masquage utilisateur (local)
+        _, category, subcategory, idx = data.split("_", 3)
+        idx = int(idx)
+        
+        if hidden_files.hide_file(user_id, category, subcategory, idx):
+            await query.answer("👁️ Fichier masqué pour vous", show_alert=True)
+            
+            # Mettre à jour le menu
+            files = storage.data.get(category, {}).get(subcategory, [])
+            visible_files = [
+                f for i, f in enumerate(files) 
+                if not hidden_files.is_hidden(user_id, category, subcategory, i)
+            ]
+            
+            msg = f"📂 {category} / {subcategory}\n\n"
+            msg += "Aucun fichier disponible." if not visible_files else f"{len(visible_files)} fichier(s) disponible(s) :"
+            
+            await query.edit_message_text(
+                msg,
+                reply_markup=create_file_menu(category, subcategory, user_id)
+            )
+        else:
+            await query.answer("❌ Erreur lors du masquage", show_alert=True)
+    
+    elif data.startswith("unhide_"):  # Rendre visible
+        _, category, subcategory, idx = data.split("_", 3)
+        idx = int(idx)
+        
+        if hidden_files.unhide_file(user_id, category, subcategory, idx):
+            await query.answer("✅ Fichier à nouveau visible", show_alert=True)
+            
+            # Mettre à jour le menu
+            files = storage.data.get(category, {}).get(subcategory, [])
+            visible_files = [
+                f for i, f in enumerate(files) 
+                if not hidden_files.is_hidden(user_id, category, subcategory, i)
+            ]
+            
+            msg = f"📂 {category} / {subcategory}\n\n"
+            msg += "Aucun fichier disponible." if not visible_files else f"{len(visible_files)} fichier(s) disponible(s) :"
+            
+            await query.edit_message_text(
+                msg,
+                reply_markup=create_file_menu(category, subcategory, user_id)
+            )
+        else:
+            await query.answer("❌ Erreur lors de l'affichage", show_alert=True)
+    
+    elif data == "view_hidden":  # Voir les fichiers masqués
+        hidden_list = hidden_files.get_hidden_files(user_id)
+        if not hidden_list:
+            await query.answer("Vous n'avez aucun fichier masqué", show_alert=True)
+            return
+        
+        await query.edit_message_text(
+            "📁 Vos fichiers masqués :\n\nCliquez sur un fichier pour le rendre à nouveau visible",
+            reply_markup=create_hidden_files_menu(user_id)
+        )
+        return VIEWING_HIDDEN
+    
+    elif data == "confirm_delete":
+        try:
+            category = context.user_data['del_category']
+            subcategory = context.user_data['del_subcategory']
+            idx = context.user_data['del_index']
+            file_data = storage.data[category][subcategory][idx]
+            
+            if storage.remove_file(category, subcategory, idx):
+                await query.edit_message_text(
+                    "🗑️ Fichier supprimé avec succès pour tous les utilisateurs !",
+                    reply_markup=create_subcategory_menu(category)
+                )
+                log_activity(user_id, "DELETE", f"{category}/{subcategory}/{file_data['file_name']}")
+            else:
+                await query.edit_message_text("❌ Erreur lors de la suppression")
+        except Exception as e:
+            logger.error(f"Delete execution error: {str(e)}")
+            await query.edit_message_text("❌ Erreur critique lors de la suppression")
+        
+        return ConversationHandler.END
     
     elif data == "back_to_main":
-        await query.edit_message_text("📂 Menu Principal :", reply_markup=create_main_menu())
+        await query.edit_message_text(
+            "📂 Menu Principal :", 
+            reply_markup=create_main_menu(user_id)
+        )
     
     elif data.startswith("back_to_sub_"):
         category = data.split("_")[-1]
@@ -262,12 +491,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     
-    if 'upload_category' in context.user_data and 'upload_subcategory' in context.user_data:
-        # C'est un upload admin
-        if user.id != ADMIN_ID:
-            await update.message.reply_text("❌ Upload réservé à l'admin")
-            return
-        
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Upload réservé à l'admin")
+        return
+    
+    # Si on est en mode upload
+    if 'upload_category' in context.user_data:
         category = context.user_data['upload_category']
         subcategory = context.user_data['upload_subcategory']
         file_msg = update.message
@@ -275,7 +504,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Détection de tout type de fichier
         file_id = None
         file_name = f"file_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        file_type = "document"
         
+        # Vérifier tous les types possibles
         if file_msg.document:
             file_id = file_msg.document.file_id
             file_name = file_msg.document.file_name or file_name
@@ -297,32 +528,40 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_name = f"voice_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
             file_type = "voice"
         else:
+            # Fallback pour tout autre type
             file_id = file_msg.effective_attachment.file_id
             file_type = "unknown"
         
-        # Sauvegarder physiquement le fichier
-        file_path = await download_and_save_file(file_id, file_name, context)
+        # Création de l'entrée
+        file_data = {
+            "file_id": file_id,
+            "file_name": file_name,
+            "file_type": file_type,
+            "date": datetime.now().isoformat(),
+            "uploader": user.first_name
+        }
         
-        if file_path:
-            file_data = {
-                "file_path": file_path,
-                "file_name": file_name,
-                "file_type": file_type,
-                "date": datetime.now().isoformat(),
-                "uploader": user.first_name
-            }
-            
-            storage.add_file(category, subcategory, file_data)
-            await update.message.reply_text(
-                f"✅ Fichier uploadé avec succès dans :\n{category} > {subcategory}"
-            )
-            log_activity(user.id, "UPLOAD", f"{category}/{subcategory}/{file_name}")
-        else:
-            await update.message.reply_text("❌ Échec de l'enregistrement du fichier")
+        storage.add_file(category, subcategory, file_data)
+        await update.message.reply_text(
+            f"✅ Fichier uploadé avec succès dans :\n{category} > {subcategory}",
+            reply_markup=create_subcategory_menu(category)
+        )
+        log_activity(user.id, "UPLOAD", f"{category}/{subcategory}/{file_name}")
         
-        # Réinitialiser
+        # Réinitialiser l'état d'upload
         del context.user_data['upload_category']
         del context.user_data['upload_subcategory']
+    else:
+        # Commencer le processus d'upload
+        context.user_data['current_file'] = update.message
+        await update.message.reply_text(
+            "Sélectionnez une catégorie :",
+            reply_markup=create_main_menu(user.id)
+        )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Opération annulée.")
+    return ConversationHandler.END
 
 def main():
     # Vérification des variables d'environnement
@@ -335,22 +574,16 @@ def main():
 
     logger.info("Initialisation du bot...")
     
-    # Vérifier les permissions
-    try:
-        test_file = RENDER_STORAGE / "test.txt"
-        with open(test_file, 'w') as f:
-            f.write("Test d'écriture")
-        test_file.unlink()
-        logger.info("Permissions d'écriture OK")
-    except Exception as e:
-        logger.critical(f"Erreur de permission: {str(e)}")
-        return
-    
-    # Créer le fichier de stockage si inexistant
+    # Créer les fichiers de stockage si inexistants
     if not STORAGE_PATH.exists():
         with open(STORAGE_PATH, 'w') as f:
             json.dump({}, f)
         logger.info("Fichier de stockage créé")
+    
+    if not HIDDEN_PATH.exists():
+        with open(HIDDEN_PATH, 'w') as f:
+            json.dump({}, f)
+        logger.info("Fichier de masquage créé")
 
     app = Application.builder().token(TOKEN).build()
     
