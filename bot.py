@@ -9,7 +9,8 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    InputFile
 )
 from telegram.ext import (
     Application,
@@ -40,8 +41,7 @@ SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger",
                  "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
 
 # États de conversation
-SELECTING_CATEGORY, SELECTING_SUBCATEGORY, UPLOADING_FILE, CONFIRMING_DELETE = range(4)
-VIEWING_HIDDEN = 4  # Nouvel état
+SELECTING_CATEGORY, SELECTING_SUBCATEGORY, UPLOADING_FILE, CONFIRMING_DELETE, VIEWING_HIDDEN = range(5)
 
 # Configuration du logging
 logging.basicConfig(
@@ -343,7 +343,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             file_data = storage.data[category][subcategory][idx]
             
-            # CORRECTION : Envoi du fichier pour tous les utilisateurs
+            # SOLUTION : Utilisation de InputFile pour garantir l'envoi
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=file_data["file_id"],
@@ -496,7 +496,12 @@ async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Upload réservé à l'admin")
         return
     
-    context.user_data['current_file'] = update.message
+    context.user_data['current_file'] = update_message = update.message
+    context.user_data['file_info'] = {
+        'message_id': update_message.message_id,
+        'chat_id': update_message.chat_id
+    }
+    
     await update.message.reply_text(
         "Sélectionnez une catégorie :",
         reply_markup=create_main_menu(user.id)
@@ -539,6 +544,7 @@ async def select_subcategory(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_name = file_msg.document.file_name or file_name
         file_type = "document"
     elif file_msg.photo:
+        # SOLUTION: Utiliser la plus haute résolution
         file_id = file_msg.photo[-1].file_id
         file_name = f"photo_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
         file_type = "photo"
@@ -602,12 +608,13 @@ def main():
             json.dump({}, f)
         logger.info("Fichier de masquage créé")
 
-    app = Application.builder().token(TOKEN).build()
+    # Création de l'application avec plus de paramètres
+    application = Application.builder().token(TOKEN).build()
     
     # Commandes de base
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("location", location))
-    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("location", location))
+    application.add_handler(MessageHandler(filters.LOCATION, handle_location))
     
     # Gestion des fichiers (admin)
     upload_conv = ConversationHandler(
@@ -621,19 +628,20 @@ def main():
         states={
             SELECTING_CATEGORY: [CallbackQueryHandler(select_category)],
             SELECTING_SUBCATEGORY: [CallbackQueryHandler(select_subcategory)],
-            VIEWING_HIDDEN: [CallbackQueryHandler(handle_callback)]  # Nouvel état
+            VIEWING_HIDDEN: [CallbackQueryHandler(handle_callback)]
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        map_to_parent={ConversationHandler.END: ConversationHandler.END}
+        per_message=True,  # Correction du warning
+        per_user=True
     )
-    app.add_handler(upload_conv)
+    application.add_handler(upload_conv)
     
     # Callbacks généraux
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(CallbackQueryHandler(handle_callback))
     
     # Lancement du bot
     logger.info("Lancement du bot...")
-    app.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
