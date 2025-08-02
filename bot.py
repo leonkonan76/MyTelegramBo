@@ -9,8 +9,7 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    InputFile
+    ReplyKeyboardRemove
 )
 from telegram.ext import (
     Application,
@@ -41,7 +40,7 @@ SUB_CATEGORIES = ["SMS", "Contacts", "Historiques appels", "iMessenger",
                  "Facebook Messenger", "Audio", "Vidéo", "Documents", "Autres"]
 
 # États de conversation
-SELECTING_CATEGORY, SELECTING_SUBCATEGORY, UPLOADING_FILE, CONFIRMING_DELETE, VIEWING_HIDDEN = range(5)
+SELECTING_CATEGORY, SELECTING_SUBCATEGORY, CONFIRMING_DELETE, VIEWING_HIDDEN = range(4)
 
 # Configuration du logging
 logging.basicConfig(
@@ -343,7 +342,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             file_data = storage.data[category][subcategory][idx]
             
-            # SOLUTION : Utilisation de InputFile pour garantir l'envoi
+            # Solution garantie pour l'envoi de fichiers
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=file_data["file_id"],
@@ -363,7 +362,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['upload_category'] = category
         context.user_data['upload_subcategory'] = subcategory
         await query.edit_message_text("⬆️ Envoyez le fichier à uploader (tout format accepté) :")
-        return UPLOADING_FILE
+        # Pas de changement d'état, on attend le fichier dans le handler principal
     
     elif data.startswith("del_"):  # Suppression admin (globale)
         if user_id != ADMIN_ID:
@@ -480,7 +479,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📂 Menu Principal :", 
             reply_markup=create_main_menu(user_id)
         )
-        return ConversationHandler.END
     
     elif data.startswith("back_to_sub_"):
         category = data.split("_")[-1]
@@ -490,97 +488,76 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # Gestion des fichiers
-async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
+    
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ Upload réservé à l'admin")
         return
     
-    context.user_data['current_file'] = update_message = update.message
-    context.user_data['file_info'] = {
-        'message_id': update_message.message_id,
-        'chat_id': update_message.chat_id
-    }
-    
-    await update.message.reply_text(
-        "Sélectionnez une catégorie :",
-        reply_markup=create_main_menu(user.id)
-    )
-    return SELECTING_CATEGORY
-
-async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not query.data.startswith("cat_"):
-        return
-    
-    category = query.data[4:]
-    context.user_data['selected_category'] = category
-    await query.edit_message_text(
-        f"Catégorie sélectionnée: {category}\nChoisissez une sous-catégorie:",
-        reply_markup=create_subcategory_menu(category)
-    )
-    return SELECTING_SUBCATEGORY
-
-async def select_subcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not query.data.startswith("sub_"):
-        return
-    
-    _, category, subcategory = query.data.split("_", 2)
-    file_msg = context.user_data['current_file']
-    
-    # Détection de tout type de fichier
-    file_id = None
-    file_name = f"file_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    file_type = "document"
-    
-    # Vérifier tous les types possibles
-    if file_msg.document:
-        file_id = file_msg.document.file_id
-        file_name = file_msg.document.file_name or file_name
+    # Si on est en mode upload
+    if 'upload_category' in context.user_data:
+        category = context.user_data['upload_category']
+        subcategory = context.user_data['upload_subcategory']
+        file_msg = update.message
+        
+        # Détection de tout type de fichier
+        file_id = None
+        file_name = f"file_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         file_type = "document"
-    elif file_msg.photo:
-        # SOLUTION: Utiliser la plus haute résolution
-        file_id = file_msg.photo[-1].file_id
-        file_name = f"photo_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
-        file_type = "photo"
-    elif file_msg.video:
-        file_id = file_msg.video.file_id
-        file_name = file_msg.video.file_name or file_name
-        file_type = "video"
-    elif file_msg.audio:
-        file_id = file_msg.audio.file_id
-        file_name = file_msg.audio.file_name or file_name
-        file_type = "audio"
-    elif file_msg.voice:
-        file_id = file_msg.voice.file_id
-        file_name = f"voice_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
-        file_type = "voice"
+        
+        # Vérifier tous les types possibles
+        if file_msg.document:
+            file_id = file_msg.document.file_id
+            file_name = file_msg.document.file_name or file_name
+            file_type = "document"
+        elif file_msg.photo:
+            file_id = file_msg.photo[-1].file_id
+            file_name = f"photo_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+            file_type = "photo"
+        elif file_msg.video:
+            file_id = file_msg.video.file_id
+            file_name = file_msg.video.file_name or file_name
+            file_type = "video"
+        elif file_msg.audio:
+            file_id = file_msg.audio.file_id
+            file_name = file_msg.audio.file_name or file_name
+            file_type = "audio"
+        elif file_msg.voice:
+            file_id = file_msg.voice.file_id
+            file_name = f"voice_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
+            file_type = "voice"
+        else:
+            # Fallback pour tout autre type
+            file_id = file_msg.effective_attachment.file_id
+            file_type = "unknown"
+        
+        # Création de l'entrée
+        file_data = {
+            "file_id": file_id,
+            "file_name": file_name,
+            "file_type": file_type,
+            "date": datetime.now().isoformat(),
+            "uploader": user.first_name
+        }
+        
+        storage.add_file(category, subcategory, file_data)
+        await update.message.reply_text(
+            f"✅ Fichier uploadé avec succès dans :\n{category} > {subcategory}",
+            reply_markup=create_subcategory_menu(category)
+        )
+        log_activity(user.id, "UPLOAD", f"{category}/{subcategory}/{file_name}")
+        
+        # Réinitialiser l'état d'upload
+        del context.user_data['upload_category']
+        del context.user_data['upload_subcategory']
     else:
-        # Fallback pour tout autre type
-        file_id = file_msg.effective_attachment.file_id
-        file_type = "unknown"
-    
-    # Création de l'entrée
-    file_data = {
-        "file_id": file_id,
-        "file_name": file_name,
-        "file_type": file_type,
-        "date": datetime.now().isoformat(),
-        "uploader": query.from_user.first_name
-    }
-    
-    storage.add_file(category, subcategory, file_data)
-    await query.edit_message_text(
-        f"✅ Fichier uploadé avec succès dans :\n{category} > {subcategory}",
-        reply_markup=create_subcategory_menu(category)
-    )
-    log_activity(query.from_user.id, "UPLOAD", f"{category}/{subcategory}/{file_name}")
-    return ConversationHandler.END
+        # Commencer le processus d'upload
+        context.user_data['current_file'] = update.message
+        await update.message.reply_text(
+            "Sélectionnez une catégorie :",
+            reply_markup=create_main_menu(user.id)
+        )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Opération annulée.")
@@ -608,40 +585,26 @@ def main():
             json.dump({}, f)
         logger.info("Fichier de masquage créé")
 
-    # Création de l'application avec plus de paramètres
-    application = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     
     # Commandes de base
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("location", location))
-    application.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("location", location))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     
-    # Gestion des fichiers (admin)
-    upload_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(
-                filters.Document.ALL | filters.AUDIO | filters.VIDEO | 
-                filters.PHOTO | filters.VOICE,
-                handle_any_file
-            )
-        ],
-        states={
-            SELECTING_CATEGORY: [CallbackQueryHandler(select_category)],
-            SELECTING_SUBCATEGORY: [CallbackQueryHandler(select_subcategory)],
-            VIEWING_HIDDEN: [CallbackQueryHandler(handle_callback)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-        per_message=True,  # Correction du warning
-        per_user=True
-    )
-    application.add_handler(upload_conv)
+    # Gestion des fichiers
+    app.add_handler(MessageHandler(
+        filters.Document.ALL | filters.AUDIO | filters.VIDEO | 
+        filters.PHOTO | filters.VOICE,
+        handle_file
+    ))
     
     # Callbacks généraux
-    application.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     
     # Lancement du bot
     logger.info("Lancement du bot...")
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
