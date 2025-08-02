@@ -347,10 +347,6 @@ async def select_subcategory(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = file_msg.voice.file_id
         file_name = f"voice_{datetime.now().strftime('%Y%m%d%H%M%S')}.ogg"
         file_type = "voice"
-    elif file_msg.sticker:
-        file_id = file_msg.sticker.file_id
-        file_name = f"sticker_{datetime.now().strftime('%Y%m%d%H%M%S')}.webp"
-        file_type = "sticker"
     else:
         # Fallback pour tout autre type
         file_id = file_msg.effective_attachment.file_id
@@ -405,8 +401,8 @@ def main():
     upload_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
-                filters.ATTACHMENT | filters.AUDIO | filters.VIDEO | 
-                filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.STICKER,
+                filters.Document.ALL | filters.Audio | filters.Video | 
+                filters.Photo | filters.Voice,
                 handle_any_file
             )
         ],
