@@ -27,7 +27,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Chemin de stockage Render précisé
 RENDER_STORAGE = Path("/opt/render/project/.render/storage")
-RENDER_STORAGE.mkdir(exist_ok=True, parents=True)  # Création du dossier
+RENDER_STORAGE.mkdir(exist_ok=True, parents=True)
 
 # Chemins des fichiers
 STORAGE_PATH = RENDER_STORAGE / "file_storage.json"
@@ -66,7 +66,6 @@ class FileStorage:
         except Exception as e:
             logger.error(f"Storage load error: {str(e)}")
         
-        # Structure initiale
         return {cat: {sub: [] for sub in SUB_CATEGORIES} for cat in MAIN_CATEGORIES}
     
     def save_data(self):
@@ -105,7 +104,7 @@ storage = FileStorage(STORAGE_PATH)
 def log_activity(user_id: int, action: str, details: str):
     log_entry = f"User:{user_id} | {action} | {details}"
     logger.info(log_entry)
-    print(log_entry)  # Pour le logging Render
+    print(log_entry)
 
 def create_main_menu():
     keyboard = []
@@ -397,12 +396,12 @@ def main():
     app.add_handler(CommandHandler("location", location))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     
-    # Gestion des fichiers (admin)
+    # Gestion des fichiers (admin) - CORRECTION APPLIQUÉE ICI
     upload_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
-                filters.Document.ALL | filters.Audio | filters.Video | 
-                filters.Photo | filters.Voice,
+                filters.Document.ALL | filters.AUDIO | filters.VIDEO | 
+                filters.PHOTO | filters.VOICE,
                 handle_any_file
             )
         ],
