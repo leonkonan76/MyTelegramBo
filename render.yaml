@@ -1,20 +1,15 @@
 services:
   - type: web
     name: konntek-bot
-    env: python
-    plan: free
+    runtime: python
     buildCommand: python -m pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.11
-      - key: TELEGRAM_TOKEN
-        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        value: votre_token_bot
       - key: ADMIN_ID
-        sync: false
-      - key: STORAGE_PATH
-        value: /opt/render/project/.render/storage/file_storage.json
-    disks:
-      - name: storage
-        mountPath: /opt/render/project/.render/storage
-        sizeGB: 50
+        value: votre_id_telegram
+    disk:
+      name: render-store
+      mountPath: /opt/render/project/.render/storage
+      sizeGB: 50
